@@ -8,6 +8,7 @@ venv/
 .env
 outputs/
 logs/
+data/
 *.joblib
 *.sqlite
 *.db
