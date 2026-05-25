@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.egg-info/
+.venv/
+venv/
+.env
+outputs/
+logs/
+*.joblib
+*.sqlite
+*.db
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Python virtual environments
+env/
+ENV/
+
