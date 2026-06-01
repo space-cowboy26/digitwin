@@ -8,7 +8,7 @@ from typing import List
 from config.settings import ITC_INV_LIST
 from core.model import model_status
 from pipelines.train_pipeline import run as run_train
-from pipelines.analysis_pipeline import run as run_inference
+from pipelines.analysis_pipeline import run as run_analysis
 from pipelines.retrain_pipeline import run as run_retrain
 
 import traceback
@@ -97,12 +97,12 @@ def run_batch_train(
 
 
 
-def run_batch_inference(
+def run_batch_analysis(
     inv_filepaths: List,
     wms_filepaths: List,
 ) -> dict:
     """
-    Run inference for all trained ITC-INV.
+    Run analysis for all trained ITC-INV.
     Skips untrained inverters.
 
     Returns:
@@ -124,7 +124,7 @@ def run_batch_inference(
         }
     """
     log.info("=" * 60)
-    log.info("Batch Inference Pipeline")
+    log.info("Batch analysis Pipeline")
     log.info("=" * 60)
 
     results = {}
@@ -142,7 +142,7 @@ def run_batch_inference(
             }
             continue
 
-        result = run_inference(
+        result = run_analysis(
             itc_inv       = itc_inv,
             inv_filepaths = inv_filepaths,
             wms_filepaths = wms_filepaths,
@@ -152,7 +152,7 @@ def run_batch_inference(
 
         if result["passed"]:
             log.info(
-                f"  {itc_inv} inference complete - "
+                f"  {itc_inv} analysis complete - "
                 f"anomaly: {result['report']['anomaly_count']} | "
                 f"warning: {result['report']['warning_count']}"
             )

@@ -1,4 +1,4 @@
-# core/inference.py
+# core/analysis.py
 
 import logging
 from pathlib import Path
@@ -25,7 +25,7 @@ def predict(
     feature_cols: list[str],
 ) -> pd.DataFrame:
     """
-    Run model inference on prepared DataFrame.
+    Run model analysis on prepared DataFrame.
     Returns df with predicted_power column added.
     """
     df = df.copy()
@@ -145,7 +145,7 @@ def save_report(
     filename: str = "anomaly_report.csv",
 ) -> Path:
     """
-    Save full inference results to outputs/ITC_INV/anomaly_report.csv
+    Save full analysis results to outputs/ITC_INV/anomaly_report.csv
     """
     out_path = OUTPUTS_DIR / itc_inv / filename
     df[[
@@ -156,16 +156,16 @@ def save_report(
     return out_path
 
 
-# -- Master inference function ------------------------------------------------─
+# -- Master analysis function ------------------------------------------------─
 
-def run_inference(
+def run_analysis(
     model,
     df:           pd.DataFrame,
     feature_cols: list[str],
     itc_inv:      str,
 ) -> tuple[pd.DataFrame, dict, Path]:
     """
-    Full inference pipeline:
+    Full analysis pipeline:
     predict -> residuals -> thresholds -> classify -> report -> save
 
     Returns:
@@ -217,7 +217,7 @@ def run_inference(
     report_path = save_report(df_result, itc_inv)
 
     log.info(
-        f"{itc_inv} inference complete - "
+        f"{itc_inv} analysis complete - "
         f"normal: {report['normal_count']} | "
         f"warning: {report['warning_count']} | "
         f"anomaly: {report['anomaly_count']}"

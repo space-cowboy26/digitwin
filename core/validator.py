@@ -82,7 +82,7 @@ def parse_timestamp(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         except Exception:
             continue
 
-    # last resort - pandas inference
+    # last resort - pandas analysis
     try:
         df = df.copy()
         df[col] = pd.to_datetime(df[col], infer_datetime_format=True)
@@ -253,7 +253,7 @@ def check_data_quality(df: pd.DataFrame) -> dict:
     """
     Checks for suspicious rows that should be removed before training.
     Returns a report dict with details for operator review.
-    Only relevant for train and retrain — not inference.
+    Only relevant for train and retrain — not analysis.
     """
     issues = []
 

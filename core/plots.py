@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 STC_IRRADIANCE = 1000.0
 
+
 # ── Colours ───────────────────────────────────────────────────────────────────
 STATUS_COLORS_MPL = {
     "normal":  "#2196F3",
@@ -34,7 +35,7 @@ STATUS_COLORS_PLOTLY = {
 # ── Output path helpers ───────────────────────────────────────────────────────
 
 def _latest_dir(itc_inv: str) -> Path:
-    """Always overwrites — latest inference run only."""
+    """Always overwrites — latest analysis run only."""
     p = OUTPUTS_DIR / itc_inv / "latest"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -268,16 +269,16 @@ def plot_anomaly_timeline(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PLOTLY — INFERENCE PLOTS (interactive HTML, saved to latest/)
+# PLOTLY — analysis PLOTS (interactive HTML, saved to latest/)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def plot_inference_time_vs_power(
+def plot_analysis_time_vs_power(
     df:      pd.DataFrame,
     itc_inv: str,
     title:   str = None,
 ) -> Path:
     """
-    Interactive Plotly time vs power plot for inference.
+    Interactive Plotly time vs power plot for analysis.
     Features:
     - Hover: timestamp, actual, predicted, residual, status, GII
     - Actual points coloured by status
@@ -408,7 +409,7 @@ def plot_inference_time_vs_power(
     date_max = df["timestamp"].dt.date.max()
 
     fig.update_layout(
-        title       = title or f"{itc_inv} -- Time vs Power | Inference",
+        title       = title or f"{itc_inv} -- Time vs Power | analysis",
         height      = 500,
         hovermode   = "x unified",
         legend      = dict(
@@ -428,7 +429,6 @@ def plot_inference_time_vs_power(
                 ],
             ),
             rangeslider = dict(visible=True),
-            type        = "date",
         ),
         yaxis  = dict(title="Active Power (kW)"),
         yaxis2 = dict(title="GII (W/m2)", showgrid=False),
@@ -444,18 +444,23 @@ def plot_inference_time_vs_power(
     return out_path
 
 
-def plot_inference_gii_vs_power(
+def plot_analysis_gii_vs_power(
     df:      pd.DataFrame,
     itc_inv: str,
     title:   str = None,
+    time_period: str = "all",
+    
+
 ) -> Path:
     """
-    Interactive Plotly GII vs Power scatter for inference.
+    Interactive Plotly GII vs Power scatter for analysis.
     Features:
     - Hover: timestamp, actual, predicted, GII, status, residual
-    - Points coloured by status
+    - Actual points coloured by status
+    - Predicted points as orange line + dots
     - Envelope line
-    - Binned mean for predicted
+    - Anomaly flags
+    - Time period selection (1d, 3d, 1w, all)
     Saves to outputs/ITC_INV/latest/gii_vs_power.html
     """
     df = df.copy()
@@ -465,23 +470,26 @@ def plot_inference_gii_vs_power(
     df["residual"]        = pd.to_numeric(df["residual"], errors="coerce")
     df["timestamp"]       = pd.to_datetime(df["timestamp"])
     df = df.dropna(subset=["gii", "active_power_kw"]).reset_index(drop=True)
+    gii_min = float(df["gii"].min())
+    gii_max = float(df["gii"].max())
+
+    # filter by time period
+    if time_period != "all":
+        from datetime import timedelta
+        max_time = df["timestamp"].max()
+        if time_period == "1d":
+            min_time = max_time - timedelta(days=1)
+        elif time_period == "3d":
+            min_time = max_time - timedelta(days=3)
+        elif time_period == "1w":
+            min_time = max_time - timedelta(weeks=1)
+        else:
+            min_time = df["timestamp"].min()
+        df = df[(df["timestamp"] >= min_time) & (df["timestamp"] <= max_time)].reset_index(drop=True)
 
     # envelope line
     gii_line = np.linspace(float(df["gii"].min()), float(df["gii"].max()), 300)
     env_line = _compute_envelope(gii_line, itc_inv)
-
-    # binned mean for predicted
-    bins        = np.arange(0, float(df["gii"].max()) + 50, 50)
-    df["bin"]   = pd.cut(df["gii"], bins=bins)
-    bin_means   = (
-        df.groupby("bin", observed=True)["predicted_power"]
-        .mean()
-        .reset_index()
-    )
-    bin_means["gii_mid"] = bin_means["bin"].apply(
-        lambda x: x.mid if hasattr(x, "mid") else np.nan
-    )
-    bin_means = bin_means.dropna()
 
     fig = go.Figure()
 
@@ -496,7 +504,7 @@ def plot_inference_gii_vs_power(
             y    = sub["active_power_kw"],
             name = f"Actual ({status.capitalize()})",
             mode = "markers",
-            marker = dict(color=color, size=4, opacity=0.4),
+            marker = dict(color=color, size=4, opacity=0.6),
             customdata = np.stack([
                 sub["timestamp"].dt.strftime("%Y-%m-%d %H:%M").values,
                 sub["predicted_power"].values,
@@ -513,17 +521,24 @@ def plot_inference_gii_vs_power(
             ),
         ))
 
-    # ── Binned mean predicted ─────────────────────────────────────────────
+    # ── Predicted as line + dots ─────────────────────────────────────────
+    df_pred = df.dropna(subset=["predicted_power"]).sort_values("gii")
     fig.add_trace(go.Scatter(
-        x         = bin_means["gii_mid"],
-        y         = bin_means["predicted_power"],
-        name      = "Predicted (binned mean)",
+        x         = df_pred["gii"],
+        y         = df_pred["predicted_power"],
+        name      = "Predicted",
         mode      = "lines+markers",
-        line      = dict(color="#FF5722", width=2),
-        marker    = dict(size=5),
+        line      = dict(color="#FF5722", width=1.5),
+        marker    = dict(color="#FF5722", size=3, opacity=0.5),
+        customdata = np.stack([
+            df_pred["timestamp"].dt.strftime("%Y-%m-%d %H:%M").values,
+            df_pred["status"].values,
+        ], axis=-1),
         hovertemplate = (
-            "<b>GII bin mid</b>: %{x:.0f} W/m2<br>"
-            "<b>Mean Predicted</b>: %{y:.1f} kW<extra></extra>"
+            "<b>Time</b>: %{customdata[0]}<br>"
+            "<b>GII</b>: %{x:.1f} W/m2<br>"
+            "<b>Predicted</b>: %{y:.1f} kW<br>"
+            "<b>Status</b>: %{customdata[1]}<extra></extra>"
         ),
     ))
 
@@ -540,11 +555,48 @@ def plot_inference_gii_vs_power(
         ),
     ))
 
+    # ── Anomaly flag markers ──────────────────────────────────────────────
+    anomalies = df[df["status"] == "anomaly"]
+    if not anomalies.empty:
+        fig.add_trace(go.Scatter(
+            x      = anomalies["gii"],
+            y      = anomalies["active_power_kw"],
+            name   = "Anomaly Flag",
+            mode   = "markers",
+            marker = dict(
+                symbol = "triangle-down",
+                size   = 12,
+                color  = "#F44336",
+                line   = dict(color="darkred", width=1),
+            ),
+            customdata = anomalies["timestamp"].dt.strftime("%Y-%m-%d %H:%M").values,
+            hovertemplate = (
+                "<b>ANOMALY</b><br>"
+                "<b>Time</b>: %{customdata}<br>"
+                "<b>GII</b>: %{x:.1f} W/m2<br>"
+                "<b>Actual</b>: %{y:.1f} kW<extra></extra>"
+            ),
+        ))
+
+    # time period label
+    period_label = {
+        "1d": "Last 24h",
+        "3d": "Last 3 days",
+        "1w": "Last 1 week",
+        "all": "All time"
+    }.get(time_period, "")
+    
     fig.update_layout(
-        title        = title or f"{itc_inv} -- GII vs Power | Inference",
+        title        = (title or f"{itc_inv} -- GII vs Power | analysis") + f" ({period_label})",
         height       = 500,
         hovermode    = "closest",
-        xaxis        = dict(title="GII (W/m2)", showgrid=True, gridcolor="#F0F0F0"),
+        xaxis        = dict(
+            title="GII (W/m2)", 
+            showgrid=True, 
+            gridcolor="#F0F0F0",
+            rangeslider=dict(visible=True),
+            type="linear",
+        ),
         yaxis        = dict(title="Active Power (kW)", showgrid=True, gridcolor="#F0F0F0"),
         legend       = dict(
             orientation = "h",
@@ -563,13 +615,13 @@ def plot_inference_gii_vs_power(
     return out_path
 
 
-def plot_inference_residual_timeline(
+def plot_analysis_residual_timeline(
     df:      pd.DataFrame,
     itc_inv: str,
     title:   str = None,
 ) -> Path:
     """
-    Interactive Plotly residual timeline for inference.
+    Interactive Plotly residual timeline for analysis.
     Features:
     - Hover: timestamp, residual, status, actual, predicted
     - Points coloured by status
@@ -657,7 +709,7 @@ def plot_inference_residual_timeline(
         )
 
     fig.update_layout(
-        title   = title or f"{itc_inv} -- Residual Timeline | Inference",
+        title   = title or f"{itc_inv} -- Residual Timeline | analysis",
         height  = 400,
         hovermode = "x unified",
         xaxis = dict(

@@ -166,14 +166,14 @@ TIMESTAMP_FORMATS = [
 BASE_DIR        = Path(__file__).resolve().parent.parent
 DATA_DIR        = BASE_DIR / "data"
 TRAIN_UPLOADS   = DATA_DIR / "train_uploads"
-INFERENCE_UPLOADS = DATA_DIR / "inference_uploads"
+analysis_UPLOADS = DATA_DIR / "analysis_uploads"
 RETRAIN_UPLOADS = DATA_DIR / "retrain_uploads"
 OUTPUTS_DIR     = BASE_DIR / "outputs"
 LOGS_DIR        = BASE_DIR / "logs"
 
 # auto-create all directories on import
 for _dir in [
-    TRAIN_UPLOADS, INFERENCE_UPLOADS, RETRAIN_UPLOADS,
+    TRAIN_UPLOADS, analysis_UPLOADS, RETRAIN_UPLOADS,
     LOGS_DIR,
     *[OUTPUTS_DIR / inv for inv in ITC_INV_LIST],
 ]:

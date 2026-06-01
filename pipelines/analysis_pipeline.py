@@ -1,4 +1,4 @@
-# pipelines/inference_pipeline.py
+# pipelines/analysis_pipeline.py
 
 import logging
 from datetime import datetime
@@ -8,14 +8,14 @@ from typing import List
 import pandas as pd
 
 from core.validator import validate, check_data_quality
-from core.data import load_and_merge, prepare_inference
+from core.data import load_and_merge, prepare_analysis
 from core.model import load_model
-from core.inference import run_inference
+from core.analysis import run_analysis
 from core.explainer import explain_anomalies
 from core.plots import (
-    plot_inference_time_vs_power,
-    plot_inference_gii_vs_power,
-    plot_inference_residual_timeline,
+    plot_analysis_time_vs_power,
+    plot_analysis_gii_vs_power,
+    plot_analysis_residual_timeline,
 )
 
 log = logging.getLogger(__name__)
@@ -27,21 +27,21 @@ def run(
     wms_filepaths: List,
 ) -> dict:
     """
-    Full inference pipeline.
+    Full analysis pipeline.
 
     Steps:
         1. Load and merge inverter + WMS files
         2. Validate merged DataFrame
         3. Load saved model + feature cols
-        4. Prepare inference data
-        5. Run inference (predict, residuals, classify, report)
+        4. Prepare analysis data
+        5. Run analysis (predict, residuals, classify, report)
         6. Run SHAP explainability on anomalies
         7. Generate all three plots
         8. Return results dict for app display
     """
     start = datetime.now()
     log.info("=" * 60)
-    log.info(f"Inference pipeline - {itc_inv}")
+    log.info(f"analysis pipeline - {itc_inv}")
     log.info("=" * 60)
 
     # -- Step 1: Load and merge --------------------------------------------
@@ -95,10 +95,10 @@ def run(
         f"test RMSE: {metadata['test_metrics']['rmse']:.2f} kW"
     )
 
-    # -- Step 4: Prepare inference data ------------------------------------
-    log.info("Step 4: Preparing inference data")
+    # -- Step 4: Prepare analysis data ------------------------------------
+    log.info("Step 4: Preparing analysis data")
     try:
-        df = prepare_inference(df, feature_cols)
+        df = prepare_analysis(df, feature_cols)
     except ValueError as e:
         return {
             "passed":    False,
@@ -107,7 +107,7 @@ def run(
             "date_swap": val_result["date_swap"],
         }
 
-    log.info(f"Inference rows after filtering: {len(df)}")
+    log.info(f"analysis rows after filtering: {len(df)}")
 
     if len(df) == 0:
         return {
@@ -120,9 +120,9 @@ def run(
             "date_swap": val_result["date_swap"],
         }
 
-    # -- Step 5: Run inference --------------------------------------------─
-    log.info("Step 5: Running inference")
-    df_result, report, report_path = run_inference(
+    # -- Step 5: Run analysis --------------------------------------------─
+    log.info("Step 5: Running analysis")
+    df_result, report, report_path = run_analysis(
         model        = model,
         df           = df,
         feature_cols = feature_cols,
@@ -130,7 +130,7 @@ def run(
     )
 
     log.info(
-        f"Inference complete - "
+        f"analysis complete - "
         f"normal: {report['normal_count']} | "
         f"warning: {report['warning_count']} | "
         f"anomaly: {report['anomaly_count']}"
@@ -155,26 +155,26 @@ def run(
     plot_gii     = None
     plot_anomaly = None
     try:
-        plot_time = plot_inference_time_vs_power(
+        plot_time = plot_analysis_time_vs_power(
             df      = df_result,
             itc_inv = itc_inv,
-            title   = f"{itc_inv} -- Inference | {date_min} to {date_max}",
+            title   = f"{itc_inv} -- Time vs Power | analysis | {date_min} to {date_max}",
         )
-        plot_gii = plot_inference_gii_vs_power(
+        plot_gii = plot_analysis_gii_vs_power(
             df      = df_result,
             itc_inv = itc_inv,
-            title   = f"{itc_inv} -- GII vs Power | Inference",
+            title   = f"{itc_inv} -- GII vs Power | analysis | {date_min} to {date_max}",
         )
-        plot_anomaly = plot_inference_residual_timeline(
+        plot_anomaly = plot_analysis_residual_timeline(
             df      = df_result,
             itc_inv = itc_inv,
-            title   = f"{itc_inv} -- Residual Timeline | Inference",
+            title   = f"{itc_inv} -- Residual Timeline | analysis",
         )
     except Exception as e:
         log.warning(f"Plot generation failed: {e}")
 
     duration = (datetime.now() - start).total_seconds()
-    log.info(f"Inference pipeline complete in {duration:.1f}s")
+    log.info(f"analysis pipeline complete in {duration:.1f}s")
 
     return {
         "passed":       True,

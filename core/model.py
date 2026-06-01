@@ -46,6 +46,26 @@ def train_grid(
     Selects best params by val RMSE.
     Returns fitted model and best params.
     """
+    # ---------check for promoted params----------
+    active_params_path = OUTPUTS_DIR/"promoted_params"/"active_params.json"
+    if active_params_path.exists():
+        with open(active_params_path) as f:
+            active = json.load(f)
+        promoted = active.get("params", {})
+        if promoted:
+            log.info(
+                f"Using promoted params: label= '{active.get('label')}'"
+                f" from {active.get('promoted_from')}"
+                f" on {active.get('promoted_at', '')[:10]}"
+            )
+            params = {**XGB_BASE, **promoted}
+            model = xgb.XGBRegressor(**params, early_stopping_rounds =30)
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=False,
+            )
+            return model, params
     keys   = list(GRID_PARAMS.keys())
     combos = list(product(*[GRID_PARAMS[k] for k in keys]))
     log.info(f"Grid search: {len(combos)} combinations")
@@ -68,7 +88,7 @@ def train_grid(
             best_rmse   = rmse
             best_params = params
             best_model  = model
-            log.info(f"  [{i+1:>3}/{len(combos)}] ★ RMSE={rmse:.2f}")
+            log.info(f"  [{i+1:>3}/{len(combos)}] * RMSE={rmse:.2f}")
 
     log.info(f"Grid search complete. Best val RMSE: {best_rmse:.2f}")
     return best_model, best_params

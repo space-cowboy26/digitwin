@@ -8,13 +8,14 @@ from typing import List
 import pandas as pd
 import streamlit as st
 
-from config.settings import ITC_INV_LIST, OUTPUTS_DIR
+from config.settings import ITC_INV_LIST, OUTPUTS_DIR, AC_CAPACITY
 from core.model import model_status
-from pipelines.batch_pipeline import (
-    run_batch_train,
-    run_batch_inference,
-    run_batch_retrain,
-)
+from pipelines.batch_pipeline import  run_batch_train, run_batch_analysis
+
+from pipelines.experiments_pipeline import run_experiment
+from experiments.registry import get_registry
+import json
+
 
 # --- Logging -------------------------------------------------------------------
 logging.basicConfig(
@@ -36,9 +37,9 @@ st.set_page_config(
 
 # --- Session state defaults ------------------------------------------------------------------------------
 if "selected_itc_inv" not in st.session_state:
-    st.session_state["selected_itc_inv"] = ITC_INV_LIST[0]
-if "batch_inference_results" not in st.session_state:
-    st.session_state["batch_inference_results"] = None
+    st.session_state["selected_itc_inv"] = ITC_INV_LIST
+if "batch_analysis_results" not in st.session_state:
+    st.session_state["batch_analysis_results"] = None
 if "train_results" not in st.session_state:
     st.session_state["train_results"] = None
 if "train_blocked" not in st.session_state:
@@ -53,6 +54,20 @@ if "retrain_inv_paths" not in st.session_state:
     st.session_state["retrain_inv_paths"] = []
 if "retrain_wms_paths" not in st.session_state:
     st.session_state["retrain_wms_paths"] = []
+if "experiment_results" not in st.session_state:
+    st.session_state["experiment_results"] = None
+if "experiment_inv_paths" not in st.session_state:
+    st.session_state["experiment_inv_paths"] = []
+if "experiment_wms_paths" not in st.session_state:
+    st.session_state["experiment_wms_paths"] = []
+if "experiment_blocked" not in st.session_state:
+    st.session_state["experiment_blocked"] = False
+if "experiment_results" not in st.session_state:
+    st.session_state["experiment_results"] = None
+if "experiment_inv_paths" not in st.session_state:
+    st.session_state["experiment_inv_paths"] = []
+if "experiment_wms_paths" not in st.session_state:
+    st.session_state["experiment_wms_paths"] = []
 
 # --- Helpers -----------------------------------------------------------------------------------------------------
 
@@ -114,7 +129,7 @@ def show_errors(errors: list):
 def show_date_swap(date_swap: dict):
     if date_swap and date_swap["suspicious"]:
         st.warning(
-            f"⚠️ Possible month/day swap in timestamps.\n\n"
+            f"Possible month/day swap in timestamps.\n\n"
             f"Sample: {date_swap['sample']}\n\n"
             f"{date_swap['reason']}\n\n"
             f"If dates look wrong, correct your files and re-upload."
@@ -160,7 +175,7 @@ def show_plots_static(plot_time: Path, plot_gii: Path, plot_anomaly: Path = None
 
 
 def show_plots_interactive(plot_time: Path, plot_gii: Path, plot_anomaly: Path = None):
-    """For inference - Plotly HTML files."""
+    """For analysis - Plotly HTML files."""
     st.markdown("---")
     if plot_time and Path(plot_time).exists():
         st.subheader("Time vs Power")
@@ -341,15 +356,45 @@ for inv in ITC_INV_LIST:
     st.sidebar.caption(f"{inv.replace('_', '-')} - {status_badge(inv)}")
 st.sidebar.markdown("---")
 st.sidebar.caption("Locally deployed - Solar Digital Twin PoC")
+st.sidebar.markdown("---")
+with st.sidebar.expander("RESET"):
+    st.warning("This will delete all trained models, metadata, and experiment results.")
+    confirm = st.text_input(
+        "Type RESET to confirm",
+        key="reset_confirm",
+    )
+    if st.button("Delete All Models", key="btn_reset", type="primary"):
+        if confirm == "RESET":
+            import shutil
+            # delete production models
+            for itc_inv in ITC_INV_LIST:
+                inv_dir = OUTPUTS_DIR / itc_inv
+                if inv_dir.exists():
+                    shutil.rmtree(inv_dir)
+            # delete experiments
+            exp_dir = OUTPUTS_DIR / "experiments"
+            if exp_dir.exists():
+                shutil.rmtree(exp_dir)
+            # delete promoted params
+            params_dir = OUTPUTS_DIR / "promoted_params"
+            if params_dir.exists():
+                shutil.rmtree(params_dir)
+            # clear session state
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.success("All models deleted. Ready for fresh training.")
+            st.rerun()
+        else:
+            st.error("Type RESET exactly to confirm.")
 
 
 # --- Tabs ---------------------------------------------------------------------------------------------------------
 
-tab_train, tab_analysis, tab_retrain, tab_manual = st.tabs([
-    " Train",
-    " Analysis",
-    " Retrain",
-    "Manual",
+tab_analysis, tab_experiments, tab_train, tab_manual = st.tabs([
+    "ANALYSIS",
+    "EXPERIMENTS",
+    "TRAIN",
+    "MANUAL",
 ])
 
 
@@ -370,6 +415,17 @@ with tab_train:
         value=False,
         help="If unchecked, already trained inverters are skipped.",
     )
+    active_params_path = OUTPUTS_DIR/"promoted_params"/"active_params.json"
+    if active_params_path.exists():
+        with open(active_params_path) as f:
+            active = json.load(f)
+        st.info(
+            f" using promoted model configs: **{active['label']}**"
+            f" (promoted from {active['promoted_from']} on {active['promoted_at'][:10]})"
+        )
+    else:
+        st.warning("No promoted model config found. Training will use default grid search.")
+    
 
     inv_files = file_collector("Inverter Report Files", "train_inv")
     wms_files = file_collector("WMS Report Files",      "train_wms")
@@ -381,32 +437,32 @@ with tab_train:
         st.session_state["train_blocked"]   = False
 
         with st.spinner("Training all inverters - this may take several minutes..."):
-            results = run_batch_train(
+            train_results = run_batch_train(
                 inv_filepaths = inv_files,
                 wms_filepaths = wms_files,
                 overwrite     = overwrite,
                 remove_faults = False,
             )
-        st.session_state["train_results"] = results
+        st.session_state["train_results"] = train_results
 
         # check if any inverter was blocked
-        any_blocked = any(r.get("blocked") for r in results.values())
+        any_blocked = any(r.get("blocked") for r in train_results.values())
         st.session_state["train_blocked"] = any_blocked
 
-    # ── Show results if available ─────────────────────────────────────────
+    # ---- Show results if available ----------------------------
     if st.session_state.get("train_results"):
-        results = st.session_state["train_results"]
+        train_results = st.session_state["train_results"]
 
-        # ── Quality report for blocked inverters ──────────────────────────
+        # ---- Quality report for blocked inverters ----------------------------------------------------
         blocked_invs = [
-            inv for inv, r in results.items() if r.get("blocked")
+            inv for inv, r in train_results.items() if r.get("blocked")
         ]
         if blocked_invs:
             st.markdown("---")
             st.subheader("Data Quality Issues Found")
             for itc_inv in blocked_invs:
                 st.markdown(f"**{itc_inv.replace('_', '-')}**")
-                show_quality_report(results[itc_inv]["quality_report"])
+                show_quality_report(train_results[itc_inv]["quality_report"])
 
             st.markdown("---")
             st.markdown("**What would you like to do?**")
@@ -451,7 +507,7 @@ with tab_train:
                         st.error("File paths lost — please re-upload your files and try again.")
                     else:
                         with st.spinner("Removing faulty rows and training..."):
-                            new_results = run_batch_train(
+                            new_train_results = run_batch_train(
                                 inv_filepaths    = inv_paths,
                                 wms_filepaths    = wms_paths,
                                 overwrite        = overwrite,
@@ -459,15 +515,15 @@ with tab_train:
                                 remove_low_days  = remove_low_days_train,
                                 remove_oscillations_train = remove_oscillations_train,
                             )
-                        st.session_state["train_results"] = new_results
+                        st.session_state["train_results"] = new_train_results
                         st.session_state["train_blocked"] = False
                         st.rerun()
             else:
                 st.info("Please clean your data and re-upload.")
 
-        # ── Training summary table ────────────────────────────────────────
+        # ---- Training summary table --------------------------------------------------------------------------------
         non_blocked = {
-            inv: r for inv, r in results.items() if not r.get("blocked")
+            inv: r for inv, r in train_results.items() if not r.get("blocked")
         }
         if non_blocked:
             st.markdown("---")
@@ -515,7 +571,274 @@ with tab_train:
 
 
 # ----------------------------------------------------------------
-# TAB 2 - ANALYSIS
+# TAB 2 - EXPERIMENTS
+# ----------------------------------------------------------------
+
+with tab_experiments:
+    st.header("Experiments - Find Best Model")
+    st.markdown(
+        "Train and compare models for a single inverter to find optimal "
+        "hyperparameters, model type (XGBoost/LightGBM), and validation strategy. "
+        "Save best model to registry for production use."
+    )
+    
+    # --- Inverter selection -----------------------------------------------------------------------------
+    selected_inv = st.selectbox(
+        "Select Inverter",
+        options=ITC_INV_LIST,
+        index=0,
+        key="experiment_selected_inv",
+    )
+    
+    # --- Model selection --------------------------------------------------------------------------------
+    col1, col2 = st.columns(2)
+    with col1:
+        model_type = st.selectbox(
+            "Model Type",
+            options=["xgboost", "lgbm"],
+            index=0,
+            key="experiment_model_type",
+        )
+    with col2:
+        split_strategy = st.selectbox(
+            "Split Strategy",
+            options=["blocked"],
+            index=0,
+            key="experiment_split_strategy",
+            help="Blocked split is recommended for production (most realistic)",
+        )
+    
+    # --- Walk-forward settings --------------------------------------------------------------------------
+    walk_forward = st.checkbox(
+        "Walk-forward validation",
+        value=True,
+        key="experiment_walk_forward",
+        help="Use rolling window validation for time-series robustness",
+    )
+    if walk_forward:
+        n_folds = st.number_input(
+            "Number of folds",
+            min_value=2,
+            max_value=10,
+            value=5,
+            key="experiment_n_folds",
+            
+        )
+    
+    # --- Hyperparameter grid ----------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Hyperparameter Grid")
+    
+    if model_type == "xgboost":
+        xgb_grid_size = st.radio(
+            "XGBoost Grid Size",
+            options=["Small", "Medium", "Large"],
+            index=1,
+            key="xgb_grid_size",
+            help="Small: 8 combos (~20s) | Medium: 96 combos (~3 min) | Large: 864 combos (~8 min)",
+        )
+        lgbm_grid_size = "Medium"
+    else:
+        lgbm_grid_size = st.radio(
+            "LightGBM Grid Size",
+            options=["Small", "Medium", "Large"],
+            index=1,
+            key="lgbm_grid_size",
+        )
+        xgb_grid_size= "Medium"
+    
+    # --- Upload files -----------------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Upload Files")
+    
+    inv_files = file_collector(f"Inverter Report Files - {selected_inv}", "experiment_inv")
+    wms_files = file_collector(f"WMS Report Files - {selected_inv}", "experiment_wms")
+    
+    # --- Run button -------------------------------------------------------------------------------------
+    if both_uploaded(inv_files, wms_files):
+        st.success(
+            f"Received {len(inv_files)} inverter file(s) "
+            f"and {len(wms_files)} WMS file(s)."
+        )
+        
+        if st.button(" Run Experiment", type="primary", key="btn_experiment"):
+            st.session_state["inv_paths"] = inv_files
+            st.session_state["wms_paths"] = wms_files
+            st.session_state["experiment_results"]   = None
+            st.session_state["experiments_blocked"]   = False
+            
+            with st.spinner(f"Running experiment for {selected_inv} - this may take several minutes..."):
+                exp_results = {selected_inv: run_experiment(
+                    itc_inv=selected_inv,
+                    inv_filepaths=inv_files,
+                    wms_filepaths=wms_files,
+                    model_type=model_type,
+                    split_strategy=split_strategy,
+                    walk_forward= walk_forward,
+                    n_walk_folds=n_folds if walk_forward else 1,
+                    remove_faults= False,
+                )}
+            
+            st.session_state["experiment_results"] = exp_results
+            st.session_state["experiment_inv_paths"] = inv_files
+            st.session_state["experiment_wms_paths"] = wms_files
+
+            any_blocked = any(r.get("blocked") for r in exp_results.values())
+            st.session_state["experiments_blocked"] = any_blocked
+
+            
+    
+    # --- Show results if available ---------------------------------------------------------------------
+    exp_results = st.session_state.get("experiment_results")
+    if exp_results and selected_inv in exp_results:
+        inv_exp_results = exp_results[selected_inv]
+        st.caption(f"Result type: {type(inv_exp_results)} | Keys: {list(inv_exp_results.keys()) if isinstance(inv_exp_results, dict) else inv_exp_results}")
+        
+
+        blocked_invs = [
+            inv for inv, r in exp_results.items() if r.get("blocked")
+        ]
+        if blocked_invs:
+            st.markdown("---")
+            st.subheader("Data Quality Issues Found")
+            for itc_inv in blocked_invs:
+                st.markdown(f"**{itc_inv.replace('_', '-')}**")
+                show_quality_report(exp_results[itc_inv]["quality_report"])
+
+            st.markdown("---")
+            st.markdown("**What would you like to do?**")
+            auto_remove_exp = st.checkbox(
+                "Auto-remove faulty rows and proceed with training",
+                key="auto_remove_exp",
+                help=(
+                    "Faulty rows will be removed automatically before training. "
+                    "Check the quality report above to understand what will be removed."
+                ),
+            )
+            if auto_remove_exp:
+                remove_low_days_exp = st.checkbox(
+                    "Also remove full low-output days",
+                    value=True,
+                    key="remove_low_days_exp",
+                    help=(
+                        "If checked, entire days where max power was below 10% of normal are removed. "
+                        "If unchecked, only individual trip rows and oscillating rows are removed."
+                    ),
+                )
+                remove_oscillations_exp = st.checkbox(
+                    "Also remove oscillating/unstable power periods",
+                    value=False,
+                    key="remove_oscillations_exp",
+                    help=(
+                        "If checked, periods where power fluctuated rapidly during high GII are removed. "
+                        "Note: cloud edge effects can look like oscillations — use with caution."
+
+                    ),
+                )
+
+                if st.button(
+                    "Proceed with Auto-removal",
+                    type="primary",
+                    key="btn_train_auto_exp",
+                ):
+                    inv_paths = st.session_state.get("experiment_inv_paths", [])
+                    wms_paths = st.session_state.get("experiment_wms_paths", [])
+
+                    if not inv_paths or not wms_paths:
+                        st.error("File paths lost — please re-upload your files and try again.")
+                    else:
+                        with st.spinner("Removing faulty rows and running experiment..."):
+                            new_exp_results = {selected_inv: run_experiment(
+                                itc_inv          = selected_inv,
+                                inv_filepaths    = inv_paths,
+                                wms_filepaths    = wms_paths,
+                                remove_faults    = True,
+                                remove_low_days  = remove_low_days_exp,
+                                walk_forward= walk_forward,
+                                n_walk_folds= n_folds if walk_forward else 1,
+                                remove_oscillations = remove_oscillations_exp,
+                            )}
+                        st.session_state["experiment_results"] = new_exp_results
+                        st.session_state["experiment_blocked"] = False
+                        st.rerun()
+            else:
+                st.info("Please clean your data and re-upload.")
+        
+        st.markdown("---")
+        st.subheader("Experiment Results")
+
+        exp_result = inv_exp_results
+        if exp_result.get("passed"):
+            st.markdown(f"**{model_type.upper()} | {split_strategy.upper()}**")
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Train RMSE", f"{exp_result['train_metrics']['rmse']:.2f} kW")
+            col2.metric("Val RMSE",   f"{exp_result['val_metrics']['rmse']:.2f} kW")
+            col3.metric("Test RMSE",  f"{exp_result['test_metrics']['rmse']:.2f} kW")
+
+            ac_capacity = AC_CAPACITY.get(selected_inv, 4400)
+            st.caption(
+                f"Test RMSE as % of rated capacity: "
+                f"{exp_result['test_metrics']['rmse'] / ac_capacity * 100:.2f}%  |  "
+                f"Walk-forward RMSE: "
+                f"{exp_result['summary'].get('fold_metrics', {}).get('mean', 0) / ac_capacity * 100:.2f}%"
+            )
+
+            col4, col5, col6 = st.columns(3)
+            col4.metric("Train R²", f"{exp_result['train_metrics']['r2']:.4f}")
+            col5.metric("Val R²",   f"{exp_result['val_metrics']['r2']:.4f}")
+            col6.metric("Test R²",  f"{exp_result['test_metrics']['r2']:.4f}")
+
+            st.markdown("**Best Hyperparameters**")
+            best_params = exp_result.get("best_params", {})
+            if best_params:
+                params_df = pd.DataFrame(
+                    list(best_params.items()),
+                    columns=["Parameter", "Value"]
+                )
+                params_df["Value"].astype(str)
+                st.dataframe(params_df, width="stretch")
+
+            st.caption(f"Grid search explored {exp_result.get('grid_search_size', 'N/A')} combinations")
+
+            if exp_result.get("overfitting_issues"):
+                st.warning("Potential overfitting detected:")
+                for issue in exp_result["overfitting_issues"]:
+                    st.caption(f"  - {issue}")
+
+            plots = exp_result.get("plots", {})
+            if plots.get("predictions") and Path(plots["predictions"]).exists():
+                st.image(plots["predictions"], caption="Predictions vs Actual")
+            if plots.get("residuals") and Path(plots["residuals"]).exists():
+                st.image(plots["residuals"], caption="Residual Distribution")
+
+            st.markdown("---")
+            st.subheader("Promote Model")
+            label = st.text_input("Label for promoted model", value=f"{model_type}_v1", key="experiment_label")
+            if st.button("Promote Model", key="btn_promote"):
+                try:
+                    from experiments.selection import promote_model
+                    promoted_path = promote_model(
+                        experiment_tag = exp_result["experiment_tag"],
+                        label          = label,
+                        itc_inv        = selected_inv,
+                        overwrite      = True,
+                    )
+                    st.success(f"Model promoted to: {promoted_path}")
+                except Exception as e:
+                    st.error(f"Promotion failed: {e}")
+
+        elif exp_result.get("blocked"):
+            pass  # already handled above
+
+        else:
+            st.error("Experiment failed.")
+            for err in exp_result.get("errors", []):
+                st.error(err)
+        
+       
+# ----------------------------------------------------------------
+# TAB 3 - ANALYSIS
 # ----------------------------------------------------------------
 
 with tab_analysis:
@@ -540,25 +863,27 @@ with tab_analysis:
             
 
             with st.spinner("Running analysis for all inverters..."):
-                results = run_batch_inference(
+                analysis_results = run_batch_analysis(
                     inv_filepaths = inv_paths,
                     wms_filepaths = wms_paths
                 )
 
-            st.session_state["batch_inference_results"] = results
+            st.session_state["batch_analysis_results"] = analysis_results
 
     # --- Summary table --------------------------------------------------------------------------------
-    results = st.session_state.get("batch_inference_results")
-    if results:
+    analysis_results = st.session_state.get("batch_analysis_results")
+    if analysis_results:
         st.markdown("---")
         st.subheader("Fleet Summary")
 
         summary_rows = []
-        for itc_inv, r in results.items():
+        for itc_inv, r in analysis_results.items():
+            if not isinstance(r,dict):
+                continue
             if r.get("skipped"):
                 summary_rows.append({
                     "Inverter": itc_inv.replace("_", "-"),
-                    "Status":   "⏭ Not trained",
+                    "Status":   " Not trained",
                     "Normal":   "-",
                     "Warning":  "-",
                     "Anomaly":  "-",
@@ -594,7 +919,7 @@ with tab_analysis:
         st.subheader("Inverter Detail")
 
         trained_invs = [
-            inv for inv, r in results.items()
+            inv for inv, r in analysis_results.items()
             if not r.get("skipped") and r.get("passed")
         ]
 
@@ -609,7 +934,7 @@ with tab_analysis:
                 key="analysis_inv_select",
             )
             st.session_state["selected_itc_inv"] = selected
-            r = results[selected]
+            r = analysis_results[selected]
 
             show_warnings(r.get("warnings", []))
             show_date_swap(r.get("date_swap"))
@@ -645,194 +970,14 @@ with tab_analysis:
         )
 
 
-# ----------------------------------------------------------------
-# TAB 3 - BATCH RETRAIN
-# ----------------------------------------------------------------
-
-with tab_retrain:
-    st.header("Monthly Retrain - All Inverters")
-    st.markdown(
-        "Upload Inverter Report and WMS Report files for the latest period. "
-        "All trained inverters will be retrained automatically."
-    )
-    
-    inv_files = file_collector("Inverter Report Files", "retrain_inv")
-    wms_files = file_collector("WMS Report Files",      "retrain_wms")
-
-    if both_uploaded(inv_files, wms_files):
-        st.success(
-            f"Received {len(inv_files)} inverter file(s) "
-            f"and {len(wms_files)} WMS file(s)."
-        )
-
-        if st.button("Retrain All", type="primary", key="btn_retrain"):
-            st.session_state["retrain_inv_paths"] = inv_files
-            st.session_state["retrain_wms_paths"] = wms_files
-            st.session_state["retrain_results"]   = None
-
-            with st.spinner("Retraining all inverters - this may take several minutes..."):
-                results = run_batch_retrain(
-                    inv_filepaths = inv_files,
-                    wms_filepaths = wms_files,
-                    remove_faults = False,
-                )
-            st.session_state["retrain_results"] = results
-            st.rerun()
-
-        # ── Show results if available ─────────────────────────────────────────
-        if st.session_state.get("retrain_results"):
-            results = st.session_state["retrain_results"]
-
-            # ── Quality report for blocked inverters ──────────────────────────
-            blocked_invs = [
-                inv for inv, r in results.items() if r.get("blocked")
-            ]
-            if blocked_invs:
-                st.markdown("---")
-                st.subheader("Data Quality Issues Found")
-                for itc_inv in blocked_invs:
-                    st.markdown(f"**{itc_inv.replace('_', '-')}**")
-                    show_quality_report(results[itc_inv]["quality_report"])
-
-                st.markdown("---")
-                st.markdown("**What would you like to do?**")
-                auto_remove_retrain = st.checkbox(
-                    "Auto-remove faulty rows and proceed with retraining",
-                    key="auto_remove_retrain",
-                    help=(
-                        "Faulty rows will be removed automatically before retraining. "
-                        "Check the quality report above to understand what will be removed."
-                    ),
-                )
-                if auto_remove_retrain:
-                    remove_low_days_retrain = st.checkbox(
-                        "Also remove full low-output days",
-                        value=True,
-                        key="remove_low_days_retrain",
-                        help=(
-                            "If checked, entire days where max power was below 10% of normal are removed. "
-                            "If unchecked, only individual trip rows and oscillating rows are removed."
-                        ),
-                    )
-                    remove_oscillations_retrain = st.checkbox(
-                        "Also remove oscillating/unstable power periods",
-                        value=False,
-                        key="remove_oscillations_retrain",
-                        help=(
-                            "If checked, periods where power fluctuated rapidly during high GII are removed. "
-                            "Note: cloud edge effects can look like oscillations — use with caution."
-                        ),
-                    )
-
-                    if st.button(
-                        "Proceed with Auto-removal",
-                        type="primary",
-                        key="btn_retrain_auto_remove",
-                    ):
-                        inv_paths = st.session_state.get("retrain_inv_paths", [])
-                        wms_paths = st.session_state.get("retrain_wms_paths", [])
-
-                        if not inv_paths or not wms_paths:
-                            st.error("File paths lost — please re-upload your files and try again.")
-                        else:
-                            with st.spinner("Removing faulty rows and retraining..."):
-                                new_results = run_batch_retrain(
-                                    inv_filepaths    = inv_paths,
-                                    wms_filepaths    = wms_paths,
-                                    overwrite        = overwrite,
-                                    remove_faults    = True,
-                                    remove_low_days  = remove_low_days_retrain,
-                                    remove_oscillations_retrain = remove_oscillations_retrain,
-                                )
-                            st.session_state["retrain_results"] = new_results
-                            st.session_state["retrain_blocked"] = False
-                            st.rerun()
-                else:
-                    st.info("Please clean your data and re-upload.")
-
-            # ── Retrain summary table ─────────────────────────────────────────
-            non_blocked = {
-                inv: r for inv, r in results.items() if not r.get("blocked")
-            }
-            if non_blocked:
-                st.markdown("---")
-                st.subheader("Retrain Summary")
-                rows = []
-                for itc_inv, r in non_blocked.items():
-                    if r.get("skipped"):
-                        rows.append({
-                            "Inverter":          itc_inv.replace("_", "-"),
-                            "Status":            "Skipped",
-                            "Previous RMSE":     "-",
-                            "New RMSE":          "-",
-                            "Prev Val RMSE":     "-",
-                            "New Val RMSE":      "-",
-                            "Change":            "-",
-                            "Saved":             "-",
-                            "Duration":          "-",
-                        })
-                    elif not r["passed"]:
-                        rows.append({
-                            "Inverter":          itc_inv.replace("_", "-"),
-                            "Status":            "Failed",
-                            "Previous RMSE":     "-",
-                            "New RMSE":          "-",
-                            "Prev Val RMSE":     "-",
-                            "New Val RMSE":      "-",
-                            "Change":            "-",
-                            "Saved":             "-",
-                            "Duration":          "-",
-                        })
-                    else:
-                        change = (
-                            f"{r['rmse_change_pct']:+.1f}%"
-                            if r["rmse_change_pct"] is not None else "-"
-                        )
-                        rows.append({
-                            "Inverter":          itc_inv.replace("_", "-"),
-                            "Status":            "Done",
-                            "Previous RMSE":     f"{r['previous_rmse']:.1f} kW"
-                                                if r["previous_rmse"] else "-",
-                            "New RMSE":          f"{r['new_rmse']:.1f} kW",
-                            "Prev Val RMSE":     f"{r['previous_val_rmse']:.1f} kW"
-                                                if r.get("previous_val_rmse") else "-",
-                            "New Val RMSE":      f"{r['val_metrics']['rmse']:.1f} kW",
-                            "Change":            change,
-                            "Saved":             "Yes" if r["model_saved"] else "No",
-                            "Duration":          f"{r['duration_sec']}s",
-                        })
-                st.dataframe(pd.DataFrame(rows), width="stretch")
-
-                for itc_inv, r in non_blocked.items():
-                    if not r.get("passed"):
-                        continue
-                    if not r["model_saved"]:
-                        st.error(
-                            f"{itc_inv.replace('_', '-')}: "
-                            f"{r['save_blocked_reason']}"
-                        )
-                    if r.get("warnings"):
-                        with st.expander(f"Warnings - {itc_inv.replace('_', '-')}"):
-                            show_warnings(r["warnings"])
-                    st.caption(
-                        f"{itc_inv.replace('_', '-')} - "
-                        f"{r.get('window_mode', '')} | "
-                        f"{r.get('months_available', '')} months available"
-                    )
-                    show_plots_static(r["plot_time"], r["plot_gii"])
-    elif inv_files or wms_files:
-        st.warning(
-            "Please upload both Inverter Report files and WMS Report files."
-        )
-
-# TAB 4 MANUAL -----------------------------------------------------
+# TAB 3 MANUAL -----------------------------------------------------
 # Add this as Tab 4 in app.py
 
 with tab_manual:
     st.header("User Manual — Solar Digital Twin")
     st.markdown("---")
 
-    # ── Overview ──────────────────────────────────────────────────────────
+    # ---- Overview ------------------------------------------------------------─
     st.subheader("Overview")
     st.markdown("""
     This application monitors solar plant inverter performance using machine learning.
@@ -841,13 +986,13 @@ with tab_manual:
 
     **Three core operations:**
     - **Train** — build a model for each inverter using historical data
-    - **Analysis** — run daily/weekly inference to detect anomalies
+    - **Analysis** — run daily/weekly analysis to detect anomalies
     - **Retrain** — update the model monthly with new data
     """)
 
     st.markdown("---")
 
-    # ── Tab 1: Train ───────────────────────────────────────────────────────
+    # ---- Tab 1: Train --------------------------------------------------------
     with st.expander(" Train Tab — Complete Guide", expanded=False):
         st.markdown("""
         ### Purpose
@@ -946,7 +1091,7 @@ with tab_manual:
         irradiance and power output.
         """)
 
-    # ── Tab 2: Analysis ────────────────────────────────────────────────────
+    # ---- Tab 2: Analysis ------------------------------------------------─
     with st.expander(" Analysis Tab — Complete Guide", expanded=False):
         st.markdown("""
         ### Purpose
@@ -1098,12 +1243,12 @@ with tab_manual:
         ---
 
         ### Data Quality Notes
-        If quality issues are detected in inference data, a collapsible note appears.
+        If quality issues are detected in analysis data, a collapsible note appears.
         This is informational only — analysis runs regardless.
         Anomalies in flagged periods may be genuine faults or data artifacts.
         """)
 
-    # ── Tab 3: Retrain ─────────────────────────────────────────────────────
+    # ---- Tab 3: Retrain ----------------------------------------------------
     with st.expander(" Retrain Tab — Complete Guide", expanded=False):
         st.markdown("""
         ### Purpose
@@ -1186,7 +1331,7 @@ with tab_manual:
         - Any data quality issues detected
         """)
 
-    # ── Sidebar ────────────────────────────────────────────────────────────
+    # ---- Sidebar ----------------------------------------------------------------─
     with st.expander(" Sidebar — Inverter Status Guide", expanded=False):
         st.markdown("""
         ### Inverter Status Badges
@@ -1210,7 +1355,7 @@ with tab_manual:
         - 100-200 kW (2.3-4.5%): acceptable, thresholds will be wider
         - Above 200 kW: consider retraining with more or cleaner data
         """)
-    # ── File Upload Guide ──────────────────────────────────────────────────
+    # ---- File Upload Guide --------------------------------------------─
     with st.expander(" File Upload Guide", expanded=False):
         st.markdown("""
         ### Uploading Files
@@ -1269,7 +1414,7 @@ with tab_manual:
         No internet connection is required once files are locally available.
         """)
 
-    # ── Anomaly Response Guide ─────────────────────────────────────────────
+    # ---- Anomaly Response Guide ------------------------------------
     with st.expander(" Anomaly Response Guide", expanded=False):
         st.markdown("""
         ### What to Do When Anomalies Are Detected
@@ -1317,7 +1462,7 @@ with tab_manual:
         If only one inverter shows anomaly → investigate that inverter specifically.
         """)
 
-    # ── Retraining Guide ──────────────────────────────────────────────────
+    # ---- Retraining Guide --------------------------------------------─
     with st.expander(" Monthly Maintenance Checklist", expanded=False):
         st.markdown("""
         ### Monthly Tasks
@@ -1335,8 +1480,8 @@ with tab_manual:
         Remove known fault periods before uploading.
         Check retrain summary — confirm RMSE improved or stayed stable.
 
-        **4. Archive important inference results**
-        Before running next inference, copy the contents of
+        **4. Archive important analysis results**
+        Before running next analysis, copy the contents of
         `outputs/ITC_INV/latest/` to `outputs/ITC_INV/archive/YYYY-MM-DD/`
         if you want to preserve plots from a significant anomaly event.
 

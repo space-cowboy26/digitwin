@@ -123,7 +123,7 @@ def load_and_merge(
     3. Concatenate all inverter frames, all WMS frames separately
     4. Deduplicate and sort both by timestamp
     5. Outer merge inverter + WMS on timestamp
-    6. Fill small gaps (<=5 min) for inference, drop missing for train/retrain
+    6. Fill small gaps (<=5 min) for analysis, drop missing for train/retrain
     7. Return (merged DataFrame, list of warnings)
     """
     log.info(
@@ -207,7 +207,7 @@ def load_and_merge(
     wms_core_col = "GII"
 
     if fill_gaps:
-        # inference only - fill small gaps, drop large ones
+        # analysis only - fill small gaps, drop large ones
         inv_missing = (
             merged[inv_core_col].isna().sum()
             if inv_core_col in merged.columns else 0
@@ -519,13 +519,13 @@ def prepare(df: pd.DataFrame) -> tuple:
     return train, val, test, feature_cols
 
 
-# -- Prepare for inference (no split, no training window) --------------------─
+# -- Prepare for analysis (no split, no training window) --------------------─
 
-def prepare_inference(df: pd.DataFrame, feature_cols: list) -> pd.DataFrame:
+def prepare_analysis(df: pd.DataFrame, feature_cols: list) -> pd.DataFrame:
     """
-    Filter and add time features for inference data.
+    Filter and add time features for analysis data.
     Uses saved feature_cols from training to ensure column consistency.
-    Does not apply training window - use all uploaded inference data.
+    Does not apply training window - use all uploaded analysis data.
     """
     df = filter_data(df)
     df = add_time_features(df)
@@ -533,7 +533,7 @@ def prepare_inference(df: pd.DataFrame, feature_cols: list) -> pd.DataFrame:
     missing = [c for c in feature_cols if c not in df.columns]
     if missing:
         raise ValueError(
-            f"Inference data is missing columns that were present at training: "
+            f"analysis data is missing columns that were present at training: "
             f"{missing}. Ensure your data files match the training format."
         )
 
