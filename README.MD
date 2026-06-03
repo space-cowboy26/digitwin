@@ -1,5 +1,4 @@
-<!-- /CMD -->
-
+CMD 
 git clone <repo-url>
 cd REPO-NAME
 python -m venv .venv
@@ -7,7 +6,7 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python -m streamlit run app.py 
 
-<!-- POWERSHELL -->
+ POWERSHELL 
 git clone <repo-url> 
 cd REPO-NAME
 python -m venv .venv
