@@ -1,4 +1,4 @@
-PySide6
+streamlit
 xgboost
 lightgbm
 pandas
@@ -10,3 +10,4 @@ openpyxl
 shap
 plotly
 optuna
+pyarrow
