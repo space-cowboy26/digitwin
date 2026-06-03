@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from datetime import datetime
+import shutil
 
 from experiments.registry import ModelRegistry, get_registry
 from experiments.tracker import ExperimentTracker, compute_metrics
@@ -267,6 +268,7 @@ def promote_model(
     label: str,
     itc_inv: str,
     overwrite: bool = False,
+    declare_as_trained: bool = False,
 ) -> Path:
     """
     Promote experiment model to production with a label.
@@ -276,6 +278,7 @@ def promote_model(
         label: Label for production model (e.g., "xgb_v1", "lgbm_rolling_best")
         itc_inv: Inverter ID
         overwrite: If True, replace existing model with same label
+        declare_as_trained: If True, move to models/ITC_INV/ instead of experiments/ITC_INV/
     
     Returns:
         Path to promoted model
@@ -302,15 +305,72 @@ def promote_model(
     if "is_promoted" not in metadata:
         metadata["is_promoted"] = True
     
-    # Save with label as experiment_tag
-    promoted_tag = f"label_{label}"
-    model_path = registry.save_model(
-        experiment_tag=promoted_tag,
-        model=model,
-        feature_cols=feature_cols,
-        metadata=metadata,
-    )
+    if declare_as_trained:
+        # 1. Match your exact production folder structure
+        prod_model_dir = Path(OUTPUTS_DIR).resolve() / itc_inv
+        prod_model_dir.mkdir(parents=True, exist_ok=True)
+        
+        prod_model_path = prod_model_dir / "model.joblib"
+        exp_model_path = registry.get_model_dir(experiment_tag) / "model.joblib"
+        
+        import shutil
+        shutil.copy2(exp_model_path, prod_model_path)
+        
+        # 2. Extract metrics safely regardless of whether metadata is raw or flattened
+        raw_val = metadata.get("val_metrics", {})
+        raw_test = metadata.get("test_metrics", {})
+        
+        val_rmse = raw_val.get("rmse", metadata.get("val_rmse"))
+        val_mae = raw_val.get("mae", metadata.get("val_mae"))
+        val_r2 = raw_val.get("r2", metadata.get("val_r2"))
+        
+        test_rmse = raw_test.get("rmse", metadata.get("test_rmse"))
+        test_mae = raw_test.get("mae", metadata.get("test_mae"))
+        test_r2 = raw_test.get("r2", metadata.get("test_r2"))
+        test_smape = raw_test.get("smape", metadata.get("test_smape"))
 
+        # 3. Build the structurally correct layout for core.model.model_status to read
+        prod_metadata = {
+            "itc_inv":        itc_inv,
+            "model_type":     metadata.get("model_type", "xgboost"),
+            "split":          metadata.get("split", "blocked"),
+            "tuning":         metadata.get("tuning", "optuna"),
+            "saved_at":       datetime.now().isoformat(),
+            "best_params":    metadata.get("hyperparams", metadata.get("best_params", {})),
+            "feature_cols":   feature_cols,
+            "val_metrics": {
+                "rmse":  float(val_rmse) if val_rmse else None,
+                "mae":   float(val_mae) if val_mae else None,
+                "r2":    float(val_r2) if val_r2 else None
+            },
+            "test_metrics": {
+                "rmse":  float(test_rmse) if test_rmse else None,
+                "mae":   float(test_mae) if test_mae else None,
+                "r2":    float(test_r2) if test_r2 else None,
+                "smape": float(test_smape) if test_smape else None
+            },
+            "retrain_history": [{
+                "date":       datetime.now().isoformat(),
+                "test_rmse":  float(test_rmse) if test_rmse else 0,
+            }]
+        }
+        
+        # Write out the metadata file right next to the model binaries
+        with open(prod_model_dir / "metadata.json", "w") as f:
+            json.dump(prod_metadata, f, indent=2, default=str)
+            
+        model_path = prod_model_path
+        log.info(f"Declared {itc_inv} as active production model with structured metadata: {prod_model_path}")
+    else:
+        # Save with label as experiment_tag
+        promoted_tag = f"label_{label}"
+        model_path = registry.save_model(
+            experiment_tag=promoted_tag,
+            model=model,
+            feature_cols=feature_cols,
+            metadata=metadata,
+        )
+    
     params_dir = OUTPUTS_DIR / "promoted_params"
     params_dir.mkdir(parents=True, exist_ok=True)
 
@@ -320,6 +380,7 @@ def promote_model(
         "promoted_from": itc_inv,
         "label":         label,
         "params":        metadata.get("hyperparams", {}),
+        "declare_as_trained": declare_as_trained,
     }
 
     # save labelled version
@@ -330,7 +391,6 @@ def promote_model(
     with open(params_dir / "active_params.json", "w") as f:
         json.dump(active_params, f, indent=2, default=str)
 
-        
     log.info(f"Promoted {itc_inv} model with label '{label}': {model_path}")
     return model_path
 

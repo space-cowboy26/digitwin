@@ -13,7 +13,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from config.settings import (
     XGB_BASE, GRID_PARAMS, RANDOM_SEED,
-    OUTPUTS_DIR,
+    OUTPUTS_DIR, 
 )
 
 log = logging.getLogger(__name__)
@@ -201,7 +201,8 @@ def model_status(itc_inv: str) -> dict:
     Returns training status for a given ITC-INV.
     Used by the app dropdown to show trained/not trained.
     """
-    meta_path = OUTPUTS_DIR / itc_inv / "metadata.json"
+    
+    meta_path = Path(OUTPUTS_DIR).resolve() / itc_inv / "metadata.json"
 
     if not meta_path.exists():
         return {

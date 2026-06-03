@@ -23,11 +23,12 @@ from experiments.selection import (
     check_overfitting,
     recommend_hyperparams,
 )
+from optuna.integration import XGBoostPruningCallback
+from optuna.integration import LightGBMPruningCallback
+from lightgbm import early_stopping
 
 log = logging.getLogger(__name__)
 
-
-# -- Grid Search Params ---------------------------------------------------------
 
 # -- Grid Search Params ---------------------------------------------------------
 
@@ -198,7 +199,7 @@ def grid_search_xgb(
     x_val: np.ndarray,
     y_val: np.ndarray,
     tracker: ExperimentTracker,
-    early_stopping_rounds: int = 30,
+    early_stopping_rounds: int = 15,
     verbose: bool = False,
     xgb_grid = None
 ) -> Tuple[xgb.XGBRegressor, Dict, Dict]:
@@ -259,7 +260,7 @@ def grid_search_lgbm(
     x_val: np.ndarray,
     y_val: np.ndarray,
     tracker: ExperimentTracker,
-    early_stopping_rounds: int = 30,
+    early_stopping_rounds: int = 15,
     verbose: bool = False,
     lgbm_grid = None,
 ) -> Tuple[lgb.LGBMRegressor, Dict, Dict]:
@@ -313,18 +314,279 @@ def grid_search_lgbm(
     log.info(f"LightGBM grid search complete. Best RMSE: {best_rmse:.2f}")
     return best_model, best_params, best_val_metrics
 
-def optuna_objective(trial, X_full, y_full):
-    params = {
-        "max_depth":        trial.suggest_int("max_depth", 4, 6),
-        "learning_rate":    trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-        "min_child_weight": trial.suggest_int("min_child_weight", 50, 300),
-        "gamma":            trial.suggest_float("gamma", 0.1, 2.0),
-        "reg_alpha":        trial.suggest_float("reg_alpha", 0.1, 5.0),
-        "reg_lambda":       trial.suggest_float("reg_lambda", 1.0, 10.0),
+
+# -- Optuna Search Functions --------------------------------------------------------
+
+def optuna_search_xgb(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
+    tracker: ExperimentTracker,
+    n_trials: int = 40,
+    xgb_grid: dict = None,
+) -> Tuple[xgb.XGBRegressor, Dict, Dict]:
+    """
+    Optuna hyperparameter optimization for XGBoost using the stable Native API
+    to completely bypass Scikit-Learn wrapper versioning conflicts.
+    
+    Returns:
+        Tuple of (best_model, best_params, best_metrics)
+    """
+    import optuna
+    from optuna.integration import XGBoostPruningCallback
+    from optuna.pruners import MedianPruner
+    
+    if xgb_grid is None:
+        xgb_grid = XGB_GRID_MEDIUM
+    
+    # 1. Create native DMatrices once up front to save memory and processing time
+    dtrain = xgb.DMatrix(x_train, label=y_train)
+    dval = xgb.DMatrix(x_val, label=y_val)
+    
+    # Extract search space bounds from your grid mapping
+    search_space = {
+        "max_depth": (min(xgb_grid.get("max_depth", [4, 8])), max(xgb_grid.get("max_depth", [4, 8]))),
+        "learning_rate": (min(xgb_grid.get("learning_rate", [0.01, 0.1])), max(xgb_grid.get("learning_rate", [0.01, 0.1]))),
+        "subsample": (min(xgb_grid.get("subsample", [0.7, 1.0])), max(xgb_grid.get("subsample", [0.7, 1.0]))),
+        "colsample_bytree": (min(xgb_grid.get("colsample_bytree", [0.7, 1.0])), max(xgb_grid.get("colsample_bytree", [0.7, 1.0]))),
+        "reg_alpha": (min(xgb_grid.get("reg_alpha", [0.0, 5.0])), max(xgb_grid.get("reg_alpha", [0.0, 5.0]))),
+        "reg_lambda": (min(xgb_grid.get("reg_lambda", [1.0, 10.0])), max(xgb_grid.get("reg_lambda", [1.0, 10.0]))),
     }
-    # each trial evaluated on walk-forward, not single val
-    wf = walk_forward_validate_with_params(params, X_full, y_full, n_folds=3)
-    return wf["mean_rmse"]
+    
+    best_booster = None
+    best_params = None
+    best_val_rmse = float("inf")
+    
+    def objective(trial):
+        # Native API parameters mapping (reg_alpha -> alpha, reg_lambda -> lambda)
+        params = {
+            "objective": "reg:squarederror",
+            "tree_method": "hist",
+            "verbosity": 0,
+            "max_depth": trial.suggest_int("max_depth", *search_space["max_depth"]),
+            "learning_rate": trial.suggest_float("learning_rate", *search_space["learning_rate"], log=True),
+            "subsample": trial.suggest_float("subsample", *search_space["subsample"]),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", *search_space["colsample_bytree"]),
+            "alpha": trial.suggest_float("reg_alpha", *search_space["reg_alpha"]),
+            "lambda": trial.suggest_float("reg_lambda", *search_space["reg_lambda"]),
+        }
+        
+        if "min_child_weight" in xgb_grid:
+            bounds = (min(xgb_grid["min_child_weight"]), max(xgb_grid["min_child_weight"]))
+            params["min_child_weight"] = trial.suggest_int("min_child_weight", *bounds)
+            
+        if "gamma" in xgb_grid:
+            bounds = (min(xgb_grid["gamma"]), max(xgb_grid["gamma"]))
+            params["gamma"] = trial.suggest_float("gamma", *bounds)
+        
+        # Setup native pruning callback tracking the validation-rmse metric
+        pruning_callback = XGBoostPruningCallback(trial, "validation-rmse")
+        
+        try:
+            # Train using the rock-solid native core engine
+            booster = xgb.train(
+                params=params,
+                dtrain=dtrain,
+                num_boost_round=1000,
+                evals=[(dval, "validation")],
+                early_stopping_rounds=30,
+                callbacks=[pruning_callback],
+                verbose_eval=False
+            )
+            
+            y_val_pred = booster.predict(dval)
+            val_rmse = float(np.sqrt(mean_squared_error(y_val, y_val_pred)))
+            
+            nonlocal best_booster, best_params, best_val_rmse
+            if val_rmse < best_val_rmse:
+                best_booster = booster
+                best_params = params
+                best_val_rmse = val_rmse
+            
+            log.info(f"   Trial {trial.number+1}: RMSE={val_rmse:.2f}")
+            return val_rmse
+            
+        except Exception as e:
+            log.warning(f"   Trial {trial.number+1} failed: {e}")
+            raise
+            
+    log.info(f"XGBoost Optuna search: {n_trials} trials")
+    study = optuna.create_study(
+        direction="minimize",
+        pruner=MedianPruner(),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    
+    log.info(f"XGBoost Optuna complete. Best RMSE: {study.best_value:.2f}")
+    
+    # 2. Map native parameters back to clean Scikit-Learn naming conventions
+    # Set n_estimators exactly to best_iteration so Step 4b doesn't need early stopping!
+    sklearn_params = {
+        **XGB_BASE,
+        "n_estimators": int(best_booster.best_iteration) if best_booster.best_iteration > 0 else 300,
+        "max_depth": best_params.get("max_depth"),
+        "learning_rate": best_params.get("learning_rate"),
+        "subsample": best_params.get("subsample"),
+        "colsample_bytree": best_params.get("colsample_bytree"),
+        "reg_alpha": best_params.get("alpha"),
+        "reg_lambda": best_params.get("lambda"),
+    }
+    if "min_child_weight" in best_params:
+        sklearn_params["min_child_weight"] = best_params["min_child_weight"]
+    if "gamma" in best_params:
+        sklearn_params["gamma"] = best_params["gamma"]
+        
+    # 3. Re-instantiate a clean, unpolluted XGBRegressor object for Step 4b
+    clean_best_model = xgb.XGBRegressor(**sklearn_params)
+    
+    # Generate final validation metrics to return for tracking logs
+    y_val_pred_final = best_booster.predict(dval)
+    best_val_metrics = compute_metrics(y_val, y_val_pred_final)
+    
+    tracker.log_grid_search(sklearn_params, best_val_metrics, True)
+    
+    return clean_best_model, sklearn_params, best_val_metrics
+
+def optuna_search_lgbm(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
+    tracker: ExperimentTracker,
+    n_trials: int = 40,
+    lgbm_grid: dict = None,
+) -> Tuple[lgb.LGBMRegressor, Dict, Dict]:
+    """
+    Optuna hyperparameter optimization for LightGBM using the stable Native API
+    to completely bypass Scikit-Learn wrapper versioning conflicts.
+    
+    Returns:
+        Tuple of (best_model, best_params, best_metrics)
+    """
+    import optuna
+    from optuna.integration import LightGBMPruningCallback
+    from optuna.pruners import MedianPruner
+    import lightgbm as lgb
+    
+    if lgbm_grid is None:
+        lgbm_grid = LGBM_GRID_MEDIUM
+    
+    # 1. Create native LightGBM Dataset objects up front to optimize memory consumption
+    train_data = lgb.Dataset(x_train, label=y_train)
+    val_data = lgb.Dataset(x_val, label=y_val, reference=train_data)
+    
+    # Extract search space bounds from your grid mapping
+    search_space = {
+        "num_leaves": (min(lgbm_grid.get("num_leaves", [31, 127])), max(lgbm_grid.get("num_leaves", [31, 127]))),
+        "max_depth": (min(lgbm_grid.get("max_depth", [4, 8])), max(lgbm_grid.get("max_depth", [4, 8]))),
+        "learning_rate": (min(lgbm_grid.get("learning_rate", [0.01, 0.1])), max(lgbm_grid.get("learning_rate", [0.01, 0.1]))),
+        "subsample": (min(lgbm_grid.get("subsample", [0.7, 1.0])), max(lgbm_grid.get("subsample", [0.7, 1.0]))),
+        "colsample_bytree": (min(lgbm_grid.get("colsample_bytree", [0.7, 1.0])), max(lgbm_grid.get("colsample_bytree", [0.7, 1.0]))),
+        "reg_alpha": (min(lgbm_grid.get("reg_alpha", [0.0, 5.0])), max(lgbm_grid.get("reg_alpha", [0.0, 5.0]))),
+        "reg_lambda": (min(lgbm_grid.get("reg_lambda", [1.0, 10.0])), max(lgbm_grid.get("reg_lambda", [1.0, 10.0]))),
+    }
+    
+    best_booster = None
+    best_params = None
+    best_val_rmse = float("inf")
+    
+    def objective(trial):
+        params = {
+            "objective": "regression",
+            "metric": "rmse",
+            "verbosity": -1,
+            "num_leaves": trial.suggest_int("num_leaves", *search_space["num_leaves"]),
+            "max_depth": trial.suggest_int("max_depth", *search_space["max_depth"]),
+            "learning_rate": trial.suggest_float("learning_rate", *search_space["learning_rate"], log=True),
+            "subsample": trial.suggest_float("subsample", *search_space["subsample"]),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", *search_space["colsample_bytree"]),
+            "reg_alpha": trial.suggest_float("reg_alpha", *search_space["reg_alpha"]),
+            "reg_lambda": trial.suggest_float("reg_lambda", *search_space["reg_lambda"]),
+        }
+        
+        # Native LightGBM requires bagging_freq=1 for subsample/bagging_fraction to execute
+        if params["subsample"] < 1.0:
+            params["bagging_freq"] = 1
+            
+        if "min_child_samples" in lgbm_grid:
+            bounds = (min(lgbm_grid["min_child_samples"]), max(lgbm_grid["min_child_samples"]))
+            params["min_child_samples"] = trial.suggest_int("min_child_samples", *bounds)
+            
+        if "min_split_gain" in lgbm_grid:
+            bounds = (min(lgbm_grid["min_split_gain"]), max(lgbm_grid["min_split_gain"]))
+            params["min_split_gain"] = trial.suggest_float("min_split_gain", *bounds)
+        
+        # Setup native pruning and early stopping callbacks
+        pruning_callback = LightGBMPruningCallback(trial, "rmse", valid_name="valid_0")
+        early_stop_callback = lgb.early_stopping(stopping_rounds=30, verbose=False)
+        
+        try:
+            # Train using the native api core directly
+            booster = lgb.train(
+                params=params,
+                train_set=train_data,
+                num_boost_round=1000,
+                valid_sets=[val_data],
+                callbacks=[pruning_callback, early_stop_callback]
+            )
+            
+            y_val_pred = booster.predict(x_val)
+            val_rmse = float(np.sqrt(mean_squared_error(y_val, y_val_pred)))
+            
+            nonlocal best_booster, best_params, best_val_rmse
+            if val_rmse < best_val_rmse:
+                best_booster = booster
+                best_params = params
+                best_val_rmse = val_rmse
+                
+            log.info(f"   Trial {trial.number+1}: RMSE={val_rmse:.2f}")
+            return val_rmse
+            
+        except Exception as e:
+            log.warning(f"   Trial {trial.number+1} failed: {e}")
+            raise
+            
+    log.info(f"LightGBM Optuna search: {n_trials} trials")
+    study = optuna.create_study(
+        direction="minimize",
+        pruner=MedianPruner(),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    
+    log.info(f"LightGBM Optuna complete. Best RMSE: {study.best_value:.2f}")
+    
+    # 2. Map parameters back to clean Scikit-Learn wrapper structures
+    # Fix n_estimators to best_iteration so Step 4b fits precisely without early stopping syntax
+    sklearn_params = {
+        "n_estimators": int(best_booster.best_iteration) if best_booster.best_iteration > 0 else 1000,
+        "num_leaves": best_params.get("num_leaves"),
+        "max_depth": best_params.get("max_depth"),
+        "learning_rate": best_params.get("learning_rate"),
+        "subsample": best_params.get("subsample"),
+        "colsample_bytree": best_params.get("colsample_bytree"),
+        "reg_alpha": best_params.get("reg_alpha"),
+        "reg_lambda": best_params.get("reg_lambda"),
+        "n_jobs": -1,
+        "verbose": -1,
+    }
+    if "min_child_samples" in best_params:
+        sklearn_params["min_child_samples"] = best_params["min_child_samples"]
+    if "min_split_gain" in best_params:
+        sklearn_params["min_split_gain"] = best_params["min_split_gain"]
+        
+    # 3. Instantiate a pristine LGBMRegressor model object for the downstream steps
+    clean_best_model = lgb.LGBMRegressor(**sklearn_params)
+    
+    # Generate final validation metrics for trackers
+    y_val_pred_final = best_booster.predict(x_val)
+    best_val_metrics = compute_metrics(y_val, y_val_pred_final)
+    
+    tracker.log_grid_search(sklearn_params, best_val_metrics, True)
+    
+    return clean_best_model, sklearn_params, best_val_metrics
+
+# -- Walk-forward Validation Function -----------------------------------------------
 
 
 
@@ -429,11 +691,12 @@ def run_experiment(
     split_strategy: str = "blocked",
     walk_forward: bool = True,
     n_walk_folds: int = 5,
-    remove_faults: bool = False,
+    remove_faults: bool = True,
     remove_low_days: bool = True,
     remove_oscillations: bool = False,
     xgb_grid_size: str = "Medium",
     lgbm_grid_size: str = "Medium",
+    use_optuna: bool = False,
 ) -> Dict:
     """
     Run a full experiment pipeline for a single inverter.
@@ -442,10 +705,13 @@ def run_experiment(
         1. Load and merge files
         2. Validate data
         3. Prepare data (split, filter, features)
-        4. Grid search for best hyperparameters
-        5. Walk-forward validation (optional)
-        6. Save best model with metadata
-        7. Generate plots
+        4. Grid search or Optuna optimization for best hyperparameters
+        5. Train final model on combined train+val data
+        6. Walk-forward validation on full data
+        7. Evaluate on test set
+        8. Check for overfitting
+        9. Generate plots
+        10. Save best model with metadata
     
     Returns:
         Dictionary with experiment results
@@ -456,7 +722,8 @@ def run_experiment(
     log.info("=" * 60)
     
     # Setup registry and tracker
-    experiment_tag = f"{model_type}_grid_{split_strategy}"
+    search_method = "optuna" if use_optuna else "grid"
+    experiment_tag = f"{model_type}_{search_method}_{split_strategy}"
     registry = get_registry(itc_inv)
     tracker = ExperimentTracker(itc_inv, experiment_tag)
     
@@ -530,25 +797,49 @@ def run_experiment(
     X_test = test_df[feature_cols].values
     y_test = test_df["active_power_kw"].values
     
-    # -- Step 4: Grid search -----------------------------------------------
-    log.info(f"Step 4: Grid search for {model_type.upper()}")
+    # -- Step 4: Hyperparameter search (Grid or Optuna) ----------------------
+    log.info(f"Step 4: {'Optuna' if use_optuna else 'Grid search'} for {model_type.upper()}")
+    
+    # Map grid sizes to Optuna trial counts
+    optuna_n_trials_map = {
+        "Small": 15,
+        "Medium": 40,
+        "Large": 80,
+    }
+    optuna_n_trials = optuna_n_trials_map.get(xgb_grid_size if model_type.lower() == "xgboost" else lgbm_grid_size, 40)
     
     if model_type.lower() == "xgboost":
-        selected_xgb_grid=  GRID_MAP.get(model_type.lower(), {}).get(xgb_grid_size, XGB_GRID_MEDIUM)
-        best_model, best_params, best_val_metrics = grid_search_xgb(
-            X_train, y_train, X_val, y_val, tracker,
-            xgb_grid=selected_xgb_grid,
-            early_stopping_rounds= 30,
-            verbose=True,
-        )
+        selected_xgb_grid = GRID_MAP.get(model_type.lower(), {}).get(xgb_grid_size, XGB_GRID_MEDIUM)
+        
+        if use_optuna:
+            best_model, best_params, best_val_metrics = optuna_search_xgb(
+                X_train, y_train, X_val, y_val, tracker,
+                n_trials=optuna_n_trials,
+                xgb_grid=selected_xgb_grid,
+            )
+        else:
+            best_model, best_params, best_val_metrics = grid_search_xgb(
+                X_train, y_train, X_val, y_val, tracker,
+                xgb_grid=selected_xgb_grid,
+                early_stopping_rounds=30,
+                verbose=True,
+            )
     elif model_type.lower() == "lgbm":
-        selected_lgbm_grid =  GRID_MAP.get(model_type.lower(), {}).get(lgbm_grid_size, LGBM_GRID_MEDIUM)
-        best_model, best_params, best_val_metrics = grid_search_lgbm(
-            X_train, y_train, X_val, y_val, tracker,
-            early_stopping_rounds= 30,
-            lgbm_grid = selected_lgbm_grid,
-            verbose=True,
-        )
+        selected_lgbm_grid = GRID_MAP.get(model_type.lower(), {}).get(lgbm_grid_size, LGBM_GRID_MEDIUM)
+        
+        if use_optuna:
+            best_model, best_params, best_val_metrics = optuna_search_lgbm(
+                X_train, y_train, X_val, y_val, tracker,
+                n_trials=optuna_n_trials,
+                lgbm_grid=selected_lgbm_grid,
+            )
+        else:
+            best_model, best_params, best_val_metrics = grid_search_lgbm(
+                X_train, y_train, X_val, y_val, tracker,
+                early_stopping_rounds=30,
+                lgbm_grid=selected_lgbm_grid,
+                verbose=True,
+            )
     else:
         return {
             "passed": False,

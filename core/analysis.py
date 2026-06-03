@@ -194,9 +194,9 @@ def run_analysis(
 
                 streak_len = j - i
 
-                if streak_len >= 10:
+                if streak_len >= 5:
                     result[i:j] = "anomaly"
-                elif streak_len >= 5:
+                elif streak_len >= 10:
                     result[i:j] = "warning"
 
                 i = j

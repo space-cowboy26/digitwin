@@ -62,18 +62,32 @@ ANOMALY_SIGMA = 3
 
 # -- Model --------------------------------------------------------------------─
 RANDOM_SEED = 42
-MODEL_TYPE  = "xgboost"      # swap to xgboost if needed
+MODEL_TYPE  = "xgboost"      # swap to lgbm if needed
 
 GRID_PARAMS = {
-    "n_estimators":     [300, 600],
-    "max_depth":        [4, 6, 8],
-    "learning_rate":    [0.05, 0.1],
-    "subsample":        [0.8, 1.0],
-    "colsample_bytree": [0.8, 1.0],
-    "min_child_samples":[10, 30],
-    "reg_alpha":        [0.0, 0.1],
-    "reg_lambda":       [1.0, 5.0],
+    "n_estimators":      [300, 500, 800],
+    "max_depth":         [4, 5, 6],         # 6 is the absolute maximum
+    "learning_rate":     [0.01, 0.05],
+    "subsample":         [0.7, 0.85],
+    "colsample_bytree":  [0.7, 0.85],
+    "min_child_weight":  [150, 300],        # Requires 2.5 to 5 hours of data per leaf
+    "gamma":             [0.5, 2.0],        # Aggressive pruning for large datasets
+    "reg_alpha":         [1.0, 5.0],
+    "reg_lambda":        [5.0, 10.0],
 }
+# LGBM_GRID_PARAMS = {
+#     "num_leaves":        [31, 45, 63],
+#     "max_depth":         [4, 5, 6],
+#     "learning_rate":     [0.01, 0.05],
+#     "subsample":         [0.7, 0.85],
+#     "colsample_bytree":  [0.7, 0.85],
+#     "min_child_samples": [200, 500],        # Extremely strict sample requirements
+#     "min_split_gain":    [0.5, 2.0],
+#     "reg_alpha":         [1.0, 5.0],
+#     "reg_lambda":        [5.0, 10.0],
+
+# }
+
 
 XGB_BASE = {
     "objective":    "reg:squarederror",

@@ -5,12 +5,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+import numpy as np
 import pandas as pd
+import xgboost as xgb
+from sklearn.metrics import mean_squared_error
 
 from core.validator import validate, _remove_faulty_rows, check_data_quality
 
 from core.data import load_and_merge, prepare
-from core.model import train_grid, evaluate, save_model
+from core.model import train_grid, evaluate, save_model, XGB_BASE
 from core.plots import plot_time_vs_power, plot_gii_vs_power
 
 log = logging.getLogger(__name__)
@@ -20,9 +23,12 @@ def run(
     itc_inv:       str,
     inv_filepaths: List,
     wms_filepaths: List,
-    remove_faults: bool = False,
+    remove_faults: bool = True,
     remove_low_days: bool = True,
-    remove_oscillations: bool =False,
+    remove_oscillations: bool = False,
+    use_optuna: bool = False,
+    optuna_trials: int = 20,
+    promoted_params: dict = None,
 ) -> dict:
     """
     Full training pipeline.
@@ -31,7 +37,7 @@ def run(
         1. Load and merge inverter + WMS files
         2. Validate merged DataFrame
         3. Prepare data (filter, time features, window, blocked split)
-        4. Train XGBoost grid search
+        4. Train XGBoost (grid search, Optuna, or use promoted params)
         5. Evaluate on val and test
         6. Save model + metadata
         7. Generate both plots on test period
@@ -120,9 +126,58 @@ def run(
     X_test  = test_df[feature_cols].values
     y_test  = test_df["active_power_kw"].values
 
-    # -- Step 4: Train ----------------------------------------------------─
-    log.info("Step 4: Training - grid search")
-    model, best_params = train_grid(X_train, y_train, X_val, y_val)
+    # -- Step 4: Train ------------------------------------------------
+    log.info("Step 4: Training")
+    
+    if promoted_params:
+        # Use promoted params directly (no tuning)
+        log.info(f"Using promoted params: {promoted_params.get('label', 'N/A')}")
+        best_params = promoted_params.get("hyperparams", {})
+        model = xgb.XGBRegressor(**XGB_BASE, **best_params, early_stopping_rounds=30)
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    
+    elif use_optuna:
+        # Optuna hyperparameter optimization
+        log.info(f"Optuna tuning ({optuna_trials} trials)")
+        import optuna
+        from optuna.pruners import MedianPruner
+        
+        def objective(trial):
+            params = {
+                "max_depth": trial.suggest_int("max_depth", 4, 8),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
+                "min_child_weight": trial.suggest_int("min_child_weight", 50, 300),
+                "subsample": trial.suggest_float("subsample", 0.7, 0.95),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 0.95),
+                "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 5.0),
+                "reg_lambda": trial.suggest_float("reg_lambda", 1.0, 10.0),
+            }
+            
+            m = xgb.XGBRegressor(**XGB_BASE, **params, early_stopping_rounds=30)
+            m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            
+            y_pred = m.predict(X_val)
+            rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
+            log.info(f"  Trial RMSE: {rmse:.2f}")
+            return rmse
+        
+        study = optuna.create_study(
+            direction="minimize",
+            pruner=MedianPruner(),
+        )
+        study.optimize(objective, n_trials=optuna_trials, show_progress_bar=True)
+        
+        best_params = study.best_params
+        log.info(f"Optuna best RMSE: {study.best_value:.2f}")
+        log.info(f"Best params: {best_params}")
+        
+        model = xgb.XGBRegressor(**XGB_BASE, **best_params, early_stopping_rounds=30)
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    
+    else:
+        # Grid search (default)
+        log.info("Grid search tuning")
+        model, best_params = train_grid(X_train, y_train, X_val, y_val)
 
     # -- Step 5: Evaluate --------------------------------------------------
     log.info("Step 5: Evaluating")

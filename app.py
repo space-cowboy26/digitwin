@@ -403,45 +403,107 @@ tab_analysis, tab_experiments, tab_train, tab_manual = st.tabs([
 # ----------------------------------------------------------------
 
 with tab_train:
-    st.header("Train Models - All Inverters")
+    st.header("Train Models")
     st.markdown(
         "Upload all daily Inverter Report and WMS Report files "
         "covering the full training period (3-6 months). "
         "Models will be trained for all ITC-INV sheets found in the files."
     )
 
-    overwrite = st.checkbox(
-        "Overwrite existing models",
-        value=False,
-        help="If unchecked, already trained inverters are skipped.",
-    )
-    active_params_path = OUTPUTS_DIR/"promoted_params"/"active_params.json"
-    if active_params_path.exists():
-        with open(active_params_path) as f:
-            active = json.load(f)
-        st.info(
-            f" using promoted model configs: **{active['label']}**"
-            f" (promoted from {active['promoted_from']} on {active['promoted_at'][:10]})"
+    col1, col2 = st.columns(2)
+    with col1:
+        overwrite = st.checkbox(
+            "Overwrite existing models",
+            value=False,
+            help="If unchecked, already trained inverters are skipped.",
+        )
+    with col2:
+        tuning_method = st.radio(
+            "Tuning method",
+            ["Grid Search", "Optuna"],
+            horizontal=True,
+            help="Grid Search: exhaustive parameter combinations. Optuna: Bayesian optimization.",
+        )
+    
+    if tuning_method == "Optuna":
+        optuna_trials = st.slider(
+            "Optuna trials",
+            min_value=10,
+            max_value=100,
+            value=20,
+            step=5,
+            help="Number of hyperparameter combinations to evaluate",
         )
     else:
-        st.warning("No promoted model config found. Training will use default grid search.")
+        optuna_trials = None
     
+    # Check for promoted params
+    promoted_params_dir = OUTPUTS_DIR / "promoted_params"
+    promoted_params_files = list(promoted_params_dir.glob("*.json")) if promoted_params_dir.exists() else []
+    promoted_params_files = [f for f in promoted_params_files if f.name != "active_params.json"]
+    
+    use_promoted = st.checkbox(
+        "Use promoted model params",
+        value=False,
+        help="Use parameters from experiments tab instead of tuning",
+    )
+    
+    if use_promoted and promoted_params_files:
+        st.markdown("**Select promoted params to apply:**")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            selected_params_file = st.selectbox(
+                "Available promoted params",
+                options=promoted_params_files,
+                format_func=lambda f: f.stem,
+                key="promoted_params_select",
+            )
+            
+            with open(selected_params_file) as f:
+                promoted_params_data = json.load(f)
+            
+            st.info(
+                f"**Label:** {promoted_params_data.get('label', 'N/A')}\n"
+                f"**From:** {promoted_params_data.get('promoted_from', 'N/A')}\n"
+                f"**Date:** {promoted_params_data.get('promoted_at', 'N/A')[:10]}"
+            )
+            
+            apply_to_all = st.checkbox(
+                "Apply to all inverters",
+                value=True,
+                help="If unchecked, you'll select per inverter after upload",
+            )
+    else:
+        selected_params_file = None
+        promoted_params_data = None
+        apply_to_all = False
+        if not promoted_params_files and use_promoted:
+            st.warning("No promoted params available. Training will use tuning method selected above.")
 
     inv_files = file_collector("Inverter Report Files", "train_inv")
     wms_files = file_collector("WMS Report Files",      "train_wms")
 
-    if st.button("Train All", type="primary", key="btn_train"):
+    if st.button("Train", type="primary", key="btn_train"):
         st.session_state["train_inv_paths"] = inv_files
         st.session_state["train_wms_paths"] = wms_files
         st.session_state["train_results"]   = None
         st.session_state["train_blocked"]   = False
+        st.session_state["train_tuning_method"] = tuning_method
+        st.session_state["train_optuna_trials"] = optuna_trials
+        st.session_state["train_promoted_params"] = promoted_params_data if use_promoted and promoted_params_data else None
+        st.session_state["train_apply_to_all"] = apply_to_all
 
-        with st.spinner("Training all inverters - this may take several minutes..."):
+        with st.spinner("Training inverters - this may take several minutes..."):
             train_results = run_batch_train(
                 inv_filepaths = inv_files,
                 wms_filepaths = wms_files,
                 overwrite     = overwrite,
                 remove_faults = False,
+                use_optuna    = (tuning_method == "Optuna"),
+                optuna_trials = optuna_trials,
+                promoted_params = st.session_state.get("train_promoted_params"),
+                apply_to_all_promoted = st.session_state.get("train_apply_to_all", False),
             )
         st.session_state["train_results"] = train_results
 
@@ -646,6 +708,19 @@ with tab_experiments:
             key="lgbm_grid_size",
         )
         xgb_grid_size= "Medium"
+
+
+    
+
+     # --- Tuning method ------------------------------------------------------------------------------------
+    st.markdown("---")
+    tuning_method = st.radio(
+        "Tuning Method",
+        ["Grid Search", "Optuna"],
+        horizontal=True,
+        key="experiment_tuning_method",
+        help="Grid Search: exhaustive search. Optuna: Bayesian optimization (faster, more efficient)",
+    )
     
     # --- Upload files -----------------------------------------------------------------------------------
     st.markdown("---")
@@ -653,6 +728,8 @@ with tab_experiments:
     
     inv_files = file_collector(f"Inverter Report Files - {selected_inv}", "experiment_inv")
     wms_files = file_collector(f"WMS Report Files - {selected_inv}", "experiment_wms")
+     
+   
     
     # --- Run button -------------------------------------------------------------------------------------
     if both_uploaded(inv_files, wms_files):
@@ -677,6 +754,9 @@ with tab_experiments:
                     walk_forward= walk_forward,
                     n_walk_folds=n_folds if walk_forward else 1,
                     remove_faults= False,
+                    xgb_grid_size=xgb_grid_size,
+                    lgbm_grid_size=lgbm_grid_size,
+                    use_optuna=(tuning_method == "Optuna"),
                 )}
             
             st.session_state["experiment_results"] = exp_results
@@ -757,6 +837,9 @@ with tab_experiments:
                                 walk_forward= walk_forward,
                                 n_walk_folds= n_folds if walk_forward else 1,
                                 remove_oscillations = remove_oscillations_exp,
+                                xgb_grid_size=xgb_grid_size,
+                                lgbm_grid_size=lgbm_grid_size,
+                                use_optuna=(tuning_method == "Optuna"),
                             )}
                         st.session_state["experiment_results"] = new_exp_results
                         st.session_state["experiment_blocked"] = False
@@ -796,7 +879,7 @@ with tab_experiments:
                     list(best_params.items()),
                     columns=["Parameter", "Value"]
                 )
-                params_df["Value"].astype(str)
+                params_df["Value"] = params_df["Value"].astype(str)
                 st.dataframe(params_df, width="stretch")
 
             st.caption(f"Grid search explored {exp_result.get('grid_search_size', 'N/A')} combinations")
@@ -813,20 +896,51 @@ with tab_experiments:
                 st.image(plots["residuals"], caption="Residual Distribution")
 
             st.markdown("---")
-            st.subheader("Promote Model")
-            label = st.text_input("Label for promoted model", value=f"{model_type}_v1", key="experiment_label")
-            if st.button("Promote Model", key="btn_promote"):
-                try:
-                    from experiments.selection import promote_model
-                    promoted_path = promote_model(
-                        experiment_tag = exp_result["experiment_tag"],
-                        label          = label,
-                        itc_inv        = selected_inv,
-                        overwrite      = True,
-                    )
-                    st.success(f"Model promoted to: {promoted_path}")
-                except Exception as e:
-                    st.error(f"Promotion failed: {e}")
+            st.subheader("Save Model")
+            
+            col_label, col_action = st.columns([3, 1])
+            with col_label:
+                label = st.text_input(
+                    "Label for model", 
+                    value=f"{model_type}_v1", 
+                    key="experiment_label"
+                )
+            
+            col_save, col_declare = st.columns(2)
+            
+            with col_save:
+                if st.button("Save to Registry", key="btn_save_registry", help="Save model for future comparison"):
+                    try:
+                        from experiments.selection import promote_model
+                        promoted_path = promote_model(
+                            experiment_tag = exp_result["experiment_tag"],
+                            label          = label,
+                            itc_inv        = selected_inv,
+                            overwrite      = False,
+                        )
+                        st.success(f"Model saved to registry: {label}")
+                    except Exception as e:
+                        st.error(f"Save failed: {e}")
+            
+            with col_declare:
+                if st.button("Declare as Trained", key="btn_declare_trained", help="Move to production as trained model for this inverter"):
+                    try:
+                        from experiments.selection import promote_model
+                        from core.model import save_model as save_prod_model
+                        import joblib
+                        
+                        # Move experimental model to production
+                        promoted_path = promote_model(
+                            experiment_tag = exp_result["experiment_tag"],
+                            label          = label,
+                            itc_inv        = selected_inv,
+                            overwrite      = True,  # This will be for production
+                            declare_as_trained = True,
+                        )
+                        st.success(f"Model declared as trained for {selected_inv}")
+                        st.info(f"Saved to: {promoted_path}")
+                    except Exception as e:
+                        st.error(f"Declaration failed: {e}")
 
         elif exp_result.get("blocked"):
             pass  # already handled above
@@ -970,533 +1084,192 @@ with tab_analysis:
         )
 
 
-# TAB 3 MANUAL -----------------------------------------------------
-# Add this as Tab 4 in app.py
+# - TAB 4 IMPLEMENTATION
 
 with tab_manual:
-    st.header("User Manual — Solar Digital Twin")
+    st.header("Operational Manual — Solar Digital Twin Dashboard")
     st.markdown("---")
 
-    # ---- Overview ------------------------------------------------------------─
-    st.subheader("Overview")
+    # ---- System Overview -----------------------------------------------------
+    st.subheader("1. Project Overview")
     st.markdown("""
-    This application monitors solar plant inverter performance using machine learning.
-    It predicts expected power output and compares it against actual output to detect
-    anomalies, warnings, and underperformance events.
-
-    **Three core operations:**
-    - **Train** — build a model for each inverter using historical data
-    - **Analysis** — run daily/weekly analysis to detect anomalies
-    - **Retrain** — update the model monthly with new data
+    
+    This **Solar Digital Twin** uses Machine Learning to create a "digital twin" of a healthy inverter. By looking at real-time weather data (sunlight and temperature), the model calculates exactly how much electricity the inverter *should* be producing right now if it were perfectly healthy. 
+    
+    By comparing this **Predicted Power** against the actual **Measured Power**, the application immediately catches underperformance, flags anomalies, and uses AI diagnostics to explain exactly what went wrong.
     """)
 
     st.markdown("---")
 
-    # ---- Tab 1: Train --------------------------------------------------------
-    with st.expander(" Train Tab — Complete Guide", expanded=False):
+    # ---- Key Concepts Explained ----------------------------------------------
+        
+    st.markdown("""
+    ### Data Quality & Preprocessing Checks
+    The model is only as good as the data it trains on. If you train a digital twin on "faulty" data (e.g., a day where an inverter was broken), the model will learn that low power output is "normal" for that weather. To prevent this, the system automatically scans your uploaded files for three common data checks before starting:
+    """)
+
+    ### Automated Pre-Cleaning
+    st.markdown("""
+        To prevent the model from learning "bad behaviors," the training pipeline automatically scans your uploads and blocks training if it finds these common errors:
+1. Inverter Trips: Timestamps where the sun is shining brightly ($GII>300\\text{ W/m}^2$) but power output is zero ($<100\\text{ kW}$)
+2. Power Oscillations: Periods where the output fluctuates wildly ($>500\\text{ kW}$ in a span of  10 minutes) during steady clear skies.
+3.  Low Output Days: Complete days where an inverter was offline or limited below 10% .
+
+
+    #### Overcoming Blocks
+    When the system identifies these patterns, it blocks the training process and flags the specific timestamps for your review. You have two primary options:
+    
+    1. **Manual Cleanup:** Use the provided timestamp report to identify the exact rows in your Excel sheets, delete them, and re-upload the cleaned files. This is the most accurate method.
+    2. **Auto-Removal:** If the error count is small, you can check the **"Auto-remove faulty rows"** box. The system will perform an internal filter—dropping only the specific minutes/days flagged—so you can proceed with training without manual spreadsheet editing.
+    3. Cross checking the files manually with the automated quality checks would be more suitable for data quality as, automated oscilalting checks wouldnt be able to identify between cloud cover or genuine failure.
+
+    By removing noise, we force the model to focus purely on the relationship between high irradiance and peak power, making the resulting anomaly detection much more sensitive and accurate.
+    """)
+    
+    
+
+
+    st.markdown("""
+    ### Data Filtering 
+    To ensure the model learns from consistent, high-quality solar irradiance data, the system applies these strict filters during load:
+    * **Time Window:** Data is pruned to strictly between **06:00 and 19:00**. Outside this range, GII is too low for reliable power-to-irradiance modeling.
+    * **Irradiance Threshold:** Rows where **GII ≤ 20 W/m²** are dropped. This removes night-time noise and early-dawn/dusk periods where the inverter is not in an active power-conversion state.
+    """)
+    st.markdown("""
+    ### Data Splitting 
+     * **Blocked Split:**
+    The Blocked Split divides your dataset into three distinct, chronological chunks: 
+                
+        **Training (Past) → Validation (Buffer) → Test (Future).**
+    
+        It mimics how the system will behave tomorrow. It preserves the natural flow of time, ensuring no future data leaks into the past.
+
+   * **Walk-Forward Validation:** 
+    Walk-Forward Validation treats timestamps like a sliding window, performing multiple training and testing passes across the timeline.
+    
+        It trains on a "window" of past data and tests on the immediate next period. Then, it "slides" the window forward, adding the previous test data to the training set, and tests on a new future period.
+                
+        If a model performs perfectly on a single split but fails during Walk-Forward Validation, it suggests the model is fragile and sensitive to seasonal weather changes.
+    """)
+
+    st.markdown("""
+    ### Machine Learning Models, Tuners & Tools
+    * **XGBoost (Extreme Gradient Boosting):** A highly powerful algorithm that builds an ensemble of decision trees step-by-step to predict inverter power based on weather variables.
+    * **LightGBM (Light Gradient Boosting Machine):** A faster, memory-efficient variation of gradient boosting designed to handle massive datasets quickly by growing trees vertically rather than horizontally.
+    * **Grid Search:** A traditional tuning method that exhaustively tests a small, manually predefined list of model settings one by one. It is slow but highly predictable.
+    * **Optuna:** An intelligent AI tuning engine that automatically runs quick training trials, guesses which hyperparameter settings will look best based on past history, and cuts off bad trials early to save laptop processing power.
+    * **Walk-Forward Validation:** A time-series evaluation technique where the model trains on past data and tests on the immediate following weeks, safely simulating real-world production performance without leaking future data.
+    
+    * **SHAP Explainability:** SHAP Explainability comes under Explainable AI (XAI), it uses SHAPLEY values derived from game theory to break down exactly how much each sensor (like string voltage or temperature) pushed the model's power prediction up or down, allowing you to pinpoint the root cause of a performance drop.
+    """)
+    
+    
+    # Error Metrics Definitions
+    st.markdown("""
+    ### Performance & Accuracy Metrics
+    * **RMSE (Root Mean Square Error):** The average prediction error of the model in kW. Because it squares errors before averaging, it penalizes large, sudden misses heavily.
+        * *RMSE as % of Rated Capacity:* Compared against the **4,400 kW** inverters, an RMSE of 44 kW is exactly **1% of capacity** (Excellent). Errors under 110 kW (2.5%) are highly reliable. Values over 200 kW mean the data used was too messy or filled with old faults.
+    * **MAE (Mean Absolute Error):** The average absolute error between predicted and actual power. Unlike RMSE, it treats all errors linearly without heavily penalizing single large spikes.
+    * **MAPE (Mean Absolute Percentage Error):** Measures error as a percentage of the actual value. However, it breaks down or goes to infinity when actual solar power output drops close to zero (like during early mornings or evenings).
+    * **sMAPE (Symmetric Mean Absolute Percentage Error):** The modified percentage metric **used in this project**. It binds percentage errors between 0% and 200%, preventing zero-power calculations from breaking your metrics during low-light hours.
+    * **R² (R-Squared / Coefficient of Determination):** Explains how much of the inverter's power variance is successfully captured by the weather data. It scales from 0.0 to 1.0, where **1.0 is a perfect fit**. A value above 0.95 means your digital twin is incredibly accurate.
+    """)
+    
+    # Thresholds Explanation
+    st.markdown("""
+    ### Anomaly Tracking Thresholds            
+    When a model is trained on clean data, it still makes tiny, random prediction errors. We take these healthy past errors and sort them into percentiles to set our alarm boundaries for the **Residual** (Actual Power minus Predicted Power).
+    
+    * **p50 (50th Percentile / Median):** The mid-point baseline error of a perfectly normal day. Actual output matches expectations smoothly.
+    * **p5 (5th Percentile — Warning Boundary):** Only 5% of healthy historical data had errors this low. If the inverter falls below this line for **10 consecutive minutes**, it triggers a **🟠 Warning**. Indicates minor losses like dust buildup, partial tree/structure shadows, or a single degrading string.
+    * **p1 (1st Percentile — Anomaly Boundary):** An extreme error that should almost never happen on a healthy day (only 1% of the cleanest data touches this). If the inverter drops past this line for **5 consecutive minutes**, it triggers a **🔴 Anomaly**. This means a serious fault has occurred, such as a blown string fuse, a complete string dropout, or an inverter trip.
+    """)
+
+    
+
+                
+    st.markdown("---")
+
+    # ---- Tab 1: Analysis -----------------------------------------------------
+    with st.expander(" 3. ANALYSIS TAB  ", expanded=False):
         st.markdown("""
         ### Purpose
-        Build the machine learning model for each inverter for the first time.
-        Run this once per inverter using 3-6 months of historical data.
-
-        ---
+        Upload recent data (1-2 weeks or a single day) to let the system score your current operations and look for faults.
 
         ### What to Upload
-        **Inverter Report files** — daily Excel files from the inverter monitoring system.
-        Each file contains one sheet per inverter with DC string measurements,
-        AC electrical data, active power, and operational counters.
+        1. **Inverter Report Files:** Daily Excel sheets containing the inverter's electrical measurements (DC string currents, AC grid voltages, power output).
+        2. **WMS Report Files:** Daily Excel sheets from the Weather Monitoring Station containing sunlight levels (GHI, GII) and ambient temperatures.
 
-        **WMS Report files** — daily Excel files from the weather monitoring station.
-        Contains GHI, GII, temperature, humidity, rain, and irradiance data.
+        ### Summary Table
+        Once executed, the dashboard grades your assets using a simple grid:
+        * **Status:** Shows a quick status badge (**🟢 Normal**, **🟠 Warning**, or **🔴 Anomaly**) based on the threshold rules explained above.
+        * **Normal / Warning / Anomaly Columns:** Shows the exact number of minutes the inverter spent in each state during the uploaded period.
+        * **Mean Residual:** The average power loss over the entire period. For example, a Mean Residual of `-15 kW` means that, on average, the inverter produced 15 kW less than it was fully capable of across the week.
 
-        Upload all daily files covering your full historical period.
-        You can paste folder paths (one per line) or drag and drop individual files.
-
-        ---
-
-        ### Checkboxes
-
-        **Overwrite existing models**
-        - Unchecked (default): if a model already exists for an inverter, it is skipped.
-        - Checked: existing models are replaced with newly trained ones.
-        - Use this if you want to retrain from scratch with better data.
-
-        ---
-
-        ### Data Quality Check
-        Before training, the app automatically checks for three types of issues:
-
-        **Inverter Trip / Zero Power at High GII**
-        Rows where irradiance is above 300 W/m² but power output is below 100 kW.
-        These are likely inverter trips, protection relay events, or communication dropouts.
-        Including these in training teaches the model that zero power at high irradiance
-        is normal — which will cause it to miss real faults later.
-
-        **Oscillating / Unstable Power**
-        Periods where power fluctuated more than 500 kW within a 10-minute window
-        during high irradiance. May be MPPT instability or protection relay hunting.
-        Note: cloud edge effects can look similar — use judgment before removing.
-
-        **Sustained Low Output Days**
-        Full days where maximum power was below 10% of normal.
-        Likely full-day outages, maintenance shutdowns, or inverter offline all day.
-
-        ---
-
-        ### When Quality Issues Are Found
-        Training is blocked and the issues are displayed with sample timestamps.
-        Two options are presented:
-
-        **Option 1 — Clean manually and re-upload**
-        Review the timestamps shown, remove those rows/days from your Excel files,
-        and upload the cleaned files.
-
-        **Option 2 — Auto-remove faulty rows and proceed**
-        Check this box and click "Proceed with Auto-removal".
-        The app removes the faulty rows automatically and trains on the remaining data.
-
-        Sub-options when auto-remove is selected:
-
-        - **Also remove full low-output days** (default: on)
-          Removes entire days identified as sustained low output.
-          Uncheck if those days represent legitimate partial operation.
-
-        - **Also remove oscillating/unstable power periods** (default: off)
-          Removes oscillating power periods.
-          Only enable if you are confident these are faults, not cloud effects.
-
-        ---
-
-        ### Training Summary Table
-        After training completes, a table shows one row per inverter:
-
-        | Column | Meaning |
-        |--------|---------|
-        | Status | Trained / Skipped / Failed / Blocked |
-        | Test RMSE | Model error on the last 7 days of data (lower is better) |
-        | Val RMSE | Model error on the 7 days before test (used during training) |
-        | Duration | Time taken to train |
-
-        **What is RMSE?**
-        Root Mean Square Error — average difference between predicted and actual power in kW.
-        A Test RMSE of 20 kW means on average the model was 20 kW off from actual output.
-        Lower is better. For anomaly detection, RMSE under 5% of rated capacity is good.
-
-        ---
-
-        ### Plots After Training
-        **Time vs Power** — shows actual vs predicted power over the test period.
-        **GII vs Power** — scatter plot of irradiance vs power output.
-        These confirm the model learned the correct relationship between
-        irradiance and power output.
+        ### Charts & Plots
+        * **Time vs Power Plot:** A timeline graph. Look for sudden drops to red lines (trips/fuses) vs gradual downward trends over days (dirt buildup).
+        * **GII vs Power Scatter Plot:** Shows how power behaves at different sunlight levels. If the output drops below the prediction line *only* during peak afternoon sun, the inverter is likely overheating (thermal derating) or clipping power.
+        * **SHAP Diagnosis Panel:** Breaks down the source of the issue. If the AI points to **DC Strings**, send a technician to check string cards, fuses, or panels. If it highlights **AC Electrical**, the issue is a grid voltage imbalance or terminal connection problem.
         """)
 
-    # ---- Tab 2: Analysis ------------------------------------------------─
-    with st.expander(" Analysis Tab — Complete Guide", expanded=False):
+    # ---- Tab 2: Experiments --------------------------------------------------
+    with st.expander(" 4. EXPERIMENTS TAB ", expanded=False):
         st.markdown("""
         ### Purpose
-        Upload recent data (1-2 weeks or daily) and the app will predict expected
-        power for each inverter, compare against actual, and flag anomalies.
+        An engineering workspace to test different settings, tuning methods, and models on a single inverter before pushing them to the live sidebar.
 
-        ---
+        ### Hyperparameter Tuning Frameworks
+        * **Grid Search:** Runs through a predefined combinations list. Safe, consistent, but slow.
+        * **Optuna:** An intelligent AI tuning engine. It evaluates trial metrics, hooks them directly into active trial pruning, and cuts off bad runs instantly using a `MedianPruner` loop to save processing time.
 
-        ### What to Upload
-        Same format as training — Inverter Report and WMS Report files.
-        Typically 1-2 weeks of daily files, or a single day's file for daily monitoring.
-
-        ---
-
-        ### Fleet Summary Table
-        After running analysis, a summary table shows all inverters at a glance:
-
-        | Column | Meaning |
-        |--------|---------|
-        | Status | 🟢 Normal / 🟠 Warning / 🔴 Anomaly |
-        | Normal | Count of minutes classified as normal |
-        | Warning | Count of minutes classified as warning |
-        | Anomaly | Count of minutes classified as anomaly |
-        | Mean Residual | Average difference between actual and predicted power |
-
-        A negative mean residual means the inverter was consistently producing
-        less than expected across the period.
-
-        ---
-
-        ### Selecting an Inverter for Detail
-        Click the dropdown below the fleet summary to select any inverter.
-        The full analysis — plots, anomaly table, and SHAP explanation — appears below.
-
-        ---
-
-        ### Status Definitions
-
-        **🟢 Normal**
-        Residual is within expected range based on the model's training error.
-        Inverter is performing as expected.
-
-        **🟠 Warning**
-        Residual crossed the warning threshold (5th percentile of training residuals)
-        for 5 or more consecutive minutes.
-        Inverter is underperforming — monitor closely.
-        Possible causes: partial shading, mild soiling, one string slightly degraded.
-
-        **🔴 Anomaly**
-        Residual crossed the anomaly threshold (1st percentile of training residuals)
-        for 10 or more consecutive minutes.
-        Significant underperformance — investigate today.
-        Possible causes: string fault, MPPT failure, inverter trip, DC cable issue.
-
-        ---
-
-        ### Plots
-
-        **Time vs Power (Interactive)**
-        - Blue points: actual power, classified as normal
-        - Orange points: actual power, classified as warning
-        - Red points: actual power, classified as anomaly
-        - Orange line: predicted power (what model expected)
-        - Grey dashed line: max envelope (theoretical ceiling based on irradiance)
-        - Gold shaded area: GII irradiance on secondary axis
-        - Red triangles: anomaly flag markers
-
-        Controls:
-        - 1D / 3D / 1W / Full buttons: zoom to last 1 day, 3 days, 1 week, or full period
-        - Range slider at bottom: drag to zoom into any custom time range
-        - Hover over any point: shows timestamp, actual, predicted, residual, GII, status
-        - Click legend items: show/hide individual traces
-
-        **GII vs Power Scatter (Interactive)**
-        - Points coloured by status (blue/orange/red)
-        - Orange line: binned mean predicted power per irradiance level
-        - Grey dashed: theoretical max envelope
-        - Hover: shows timestamp, GII, actual, predicted, residual, status
-
-        Diagnostic use:
-        - Points clustering below the orange line at all GII levels → inverter-level fault
-        - Points below only at high GII → possible clipping or thermal derating
-        - Points below only at low GII → possible minimum power threshold issue
-
-        **Residual Timeline (Interactive)**
-        - Points coloured by status
-        - Zero line: perfect prediction
-        - Orange dashed line: warning threshold
-        - Red dashed line: anomaly threshold
-        - Hover: timestamp, residual, actual, predicted, status
-
-        Patterns to look for:
-        - Sudden deep drop to red → inverter trip or string fault
-        - Gradual drift to orange → soiling or slow degradation
-        - Periodic orange spikes at same time daily → shading at specific hours
-        - Short red spikes → sensor noise or brief communication loss
-        - Sustained red → serious fault, schedule inspection
-
-        ---
-
-        ### Anomaly Table
-        Lists every anomaly event with exact timestamp, actual power,
-        predicted power, residual, and status.
-        Use the timestamp to cross-reference with inverter SCADA logs.
-
-        ### Warning Events
-        Shown in a collapsible expander below the anomaly table.
-
-        ### Download Anomaly Report
-        Downloads a CSV of all anomaly and warning events for record-keeping
-        or further analysis.
-
-        ---
-
-        ### SHAP Explanation — Why Did This Anomaly Occur?
-
-        **Feature Summary Bar Chart**
-        Shows which sensor features contributed most to the model's prediction
-        during anomaly periods. Longer bar = more influence on prediction.
-
-        **Feature Family Pie Chart**
-        Groups features by category:
-        - DC Strings: mod1-4 DC voltage, current, power
-        - AC Electrical: phase voltages, currents, power factor
-        - Irradiance: GHI, GII, direct, diffuse radiation
-        - Temperature: module and ambient temperature
-        - Time: hour of day, month, day of year
-
-        High DC Strings % → model expected high output based on DC string readings
-        → investigate string currents and voltages
-
-        High AC Electrical % → model expected high output based on AC measurements
-        → investigate phase voltages and grid connection
-
-        **Waterfall Chart (per event)**
-        Shows exactly how each feature pushed the prediction up or down
-        for a specific anomaly timestamp.
-
-        Red bars → feature pushed prediction up (model expected high output because of this)
-        Blue bars → feature pushed prediction down
-
-        The gap between predicted (orange line) and actual (blue line)
-        is the residual — the anomaly.
-
-        **Text Explanation**
-        Plain English summary of the likely fault cause based on which
-        feature family dominated the prediction.
-
-        ---
-
-        ### Data Quality Notes
-        If quality issues are detected in analysis data, a collapsible note appears.
-        This is informational only — analysis runs regardless.
-        Anomalies in flagged periods may be genuine faults or data artifacts.
+        ### Pushing to Production
+        * **Save to Registry:** Saves the model as a backup candidate under a custom version name.
+        * **Declare as Trained:** Finalizes your work. It copies the model weights into the active system slot, updates the sidebar state, and sets up the new `metadata.json` boundaries.
         """)
 
-    # ---- Tab 3: Retrain ----------------------------------------------------
-    with st.expander(" Retrain Tab — Complete Guide", expanded=False):
+    # ---- Tab 3: Train --------------------------------------------------------
+    # app.py — TRAIN TAB MANUAL SECTION
+
+    with st.expander(" 3. TRAIN TAB", expanded=False):
         st.markdown("""
         ### Purpose
-        Update the model monthly with new data so it tracks the inverter's
-        current performance baseline rather than its state from months ago.
+        Builds the initial digital twin for new inverters. Use this to establish a performance baseline using 3-6 months of historical data.
+
+        ### Control Panel Reference
+        | Control | Function | Technical Purpose |
+        | :--- | :--- | :--- |
+        | **Data Source Input** | Text box for folder paths or drag-and-drop file uploader. | Aggregates and merges Inverter and WMS weather reports for training. |
+        | **Overwrite Models** | Checkbox toggle. | If unchecked, the system ignores inverters that already have a model. If checked, it forces a hard re-train, replacing existing binaries. |
+        | **Tuning Method** | Radio selector: **Grid Search** vs **Optuna**. | Selects the hyperparameter optimization engine. |
+        | **Optuna Trials** | Slider (10-100). | Sets the optimization budget. |
+        | **Promoted Params** | Selector for `.json` files. | Injects a pre-verified configuration from the Experiments tab. |
+        | **Apply to All** | Checkbox toggle. | When checked, forces the selected **Promoted Params** file to be used for *every* inverter in the batch, skipping individual tuning loops. |
+        | **Train Button** | Execution trigger. | Starts data cleaning, filtering, and the training search engine. |
 
         ---
 
-        ### When to Retrain
-        - Every month on the 1st
-        - After a panel cleaning event
-        - After a string fault is repaired
-        - After an inverter component is replaced
-        - If anomaly detection starts generating many false alarms
+        ### Operational Logic & Workflow Rules
 
-        ---
+        * **Applying Promoted Parameters:** If you have developed a "Champion" configuration in the *Experiments* tab, select the parameter file in the **Promoted Params** dropdown. By checking **"Apply to all"**, you bypass the time-consuming tuning loop for the entire batch, forcing all inverters to adopt that verified configuration immediately.
 
-        ### What to Upload
-        Upload all accumulated historical data including the new month.
-        Example: if original training used January-March, upload January-May for May retrain.
-        The app automatically applies the correct training window:
-        - First 12 months: uses all uploaded data (expanding window)
-        - After 12 months: uses only the most recent 120 days (rolling window)
+        * **Analysis Tab Dependency:**  **CRITICAL:** The Analysis tab exclusively uses inverters with a **"Trained"** status. 
+            If an inverter is not found in the production registry (or shows "-- Not trained yet" in the sidebar), the Analysis tab will ignore it. This prevents confusion and stops the system from attempting to infer data for uninitialized assets.
 
-        **Important:** Remove known fault periods from your data before uploading.
-        The model should learn healthy normal behaviour only.
-        Fault periods in training data will cause the model to treat faults as normal.
+        * **Sidebar Synchronization:** Upon successful training, the system updates the production registry (`outputs/ITC_INV/model.joblib`) and generates the required `metadata.json`. The sidebar status badge will automatically shift to green, signaling that the asset is now eligible for global fleet analysis.
 
-        ---
-
-        ### Data Quality Check
-        Same as training — the app checks for trips, oscillations, and low-output days.
-        Same auto-remove options are available.
-
-        ---
-
-        ### Retrain Summary Table
-
-        | Column | Meaning |
-        |--------|---------|
-        | Previous RMSE | Test RMSE of the model before retraining |
-        | New RMSE | Test RMSE of the newly trained model |
-        | Prev Val RMSE | Validation RMSE before retraining |
-        | New Val RMSE | Validation RMSE of new model |
-        | Change | % change in test RMSE (negative = improvement) |
-        | Saved | Whether the new model was saved |
-
-        ---
-
-        ### Safety Check
-        The new model is only saved if its test RMSE is within 150% of the previous RMSE.
-        If the new model is significantly worse, it is not saved and the old model
-        is kept. The reason is shown in the app.
-
-        A large RMSE increase usually means:
-        - Fault periods were included in retrain data
-        - Too little data was uploaded
-        - Data quality issues were not addressed
-
-        ---
-
-        ### Window Mode
-        Shown at the bottom of each inverter's retrain result:
-
-        **Expanding window** — all uploaded data is used for training.
-        Shown when less than 12 months of data is available.
-
-        **Rolling 120-day window** — only the most recent 4 months are used.
-        Shown when more than 12 months of data is available.
-        This prevents old data from a different degradation state
-        affecting the current model.
-
-        ---
-
-        ### Warnings Section
-        Expandable per inverter. Shows:
-        - Rows dropped due to missing timestamps
-        - New features added since last training
-        - Features removed since last training
-        - Any data quality issues detected
+        
         """)
 
-    # ---- Sidebar ----------------------------------------------------------------─
-    with st.expander(" Sidebar — Inverter Status Guide", expanded=False):
+    # ---- System Maintenance --------------------------------------------------
+    with st.expander(" 6. SIDEBAR STATUS & SYSTEM MAINTENANCE", expanded=False):
         st.markdown("""
-        ### Inverter Status Badges
+        ### Sidebar Status Meanings
+        * **Trained | Last: 2026-06-02 | RMSE: 32.1 kW:** The digital twin is active, highly accurate (under 1.1% capacity error), and actively protecting that inverter.
+        * **-- Not trained yet:** No model exists for this asset. It will be ignored during global analysis loops until initialized in the Train tab.
 
-        ** Trained | Last: YYYY-MM-DD | RMSE: XX.X kW**
-        Model exists for this inverter. Shows date of last training/retrain
-        and current test RMSE.
-
-        **⚪ Not trained yet**
-        No model exists. Go to Train tab to train this inverter.
-
-        ---
-
-        ### What is Test RMSE?
-        The average prediction error of the model on unseen data.
-        Lower is better.
-
-        General guidance for this plant (rated 4400 kW):
-        - Under 50 kW (< 1.1% of rated): excellent
-        - 50-100 kW (1.1-2.3%): good, suitable for anomaly detection
-        - 100-200 kW (2.3-4.5%): acceptable, thresholds will be wider
-        - Above 200 kW: consider retraining with more or cleaner data
-        """)
-    # ---- File Upload Guide --------------------------------------------─
-    with st.expander(" File Upload Guide", expanded=False):
-        st.markdown("""
-        ### Uploading Files
-
-        **Method 1 — Folder Path**
-        Paste the full folder path into the text area.
-        All Excel files in that folder are loaded automatically.
-        You can paste multiple folder paths, one per line.
-
-        Example:
-                C:/Solar/Data/April/Inverter
-                C:/Solar/Data/May/Inverter
-
-        **Method 2 — Individual Files**
-        Use the file uploader to drag and drop individual Excel files.
-        Can be combined with folder paths — all files are merged and deduplicated.
-
-        ---
-
-        ### File Naming
-        File names do not need to follow any specific convention.
-        The app reads timestamps from inside the files, not from filenames.
-
-        ---
-
-        ### Supported Formats
-        .xlsx and .xls files only.
-
-        ---
-
-        ### Common Issues
-
-        **"Folder not found"**
-        Check the folder path is correct and the drive letter matches.
-        Use forward slashes or raw strings with backslashes.
-
-        **"No xlsx/xls files in folder"**
-        The folder exists but contains no Excel files.
-        Check you selected the correct subfolder.
-
-        **"No inverter files could be read"**
-        The Excel files do not contain the expected sheet names for this inverter.
-        Check that the inverter report contains the correct sheet
-        (e.g. ICR-1_INV-1 for ITC1-INV1).
-
-        **Timestamp warnings**
-        The app detects and reports missing timestamps, filled gaps,
-        and dropped rows. These are informational — processing continues automatically.
-
-        ---
-
-        ### SharePoint / Network Drives
-        Map your SharePoint library as a network drive (e.g. Z:\\)
-        or sync via OneDrive to a local folder.
-        Then paste that path into the folder input.
-        No internet connection is required once files are locally available.
-        """)
-
-    # ---- Anomaly Response Guide ------------------------------------
-    with st.expander(" Anomaly Response Guide", expanded=False):
-        st.markdown("""
-        ### What to Do When Anomalies Are Detected
-
-        **Step 1 — Check the Fleet Summary**
-        Identify which inverters show 🔴 or 🟠 status.
-        Check mean residual — large negative values indicate sustained underperformance.
-
-        **Step 2 — Select the affected inverter**
-        Use the dropdown to view detailed analysis.
-
-        **Step 3 — Check the Time vs Power plot**
-        - When did the anomaly start and end?
-        - Was it sudden or gradual?
-        - Does it correlate with a GII drop (cloud) or persist through high GII?
-
-        **Step 4 — Check the SHAP explanation**
-        - Which feature family dominated? DC Strings or AC Electrical?
-        - DC Strings dominant → check string currents and voltages on SCADA
-        - AC Electrical dominant → check phase voltages and grid connection
-
-        **Step 5 — Cross-reference with SCADA**
-        Use the exact timestamps from the anomaly table to check
-        inverter SCADA logs for alarms, trips, or communication faults.
-
-        **Step 6 — Decision**
-
-        | Situation | Action |
-        |-----------|--------|
-        | Anomaly during cloud event | Monitor, likely benign |
-        | Anomaly with SCADA alarm | Escalate to maintenance |
-        | Anomaly with no SCADA alarm | Check string fuse / DC cables |
-        | Warning persisting multiple days | Schedule inspection |
-        | Mean residual trending negative over weeks | Schedule cleaning |
-
-        ---
-
-        ### False Alarms
-        Some anomalies may be false alarms caused by:
-        - Sensor calibration drift
-        - Communication dropout (data gap filled or dropped)
-        - Grid events affecting all inverters simultaneously
-
-        If all inverters show anomaly at the same timestamp → likely grid event, not inverter fault.
-        If only one inverter shows anomaly → investigate that inverter specifically.
-        """)
-
-    # ---- Retraining Guide --------------------------------------------─
-    with st.expander(" Monthly Maintenance Checklist", expanded=False):
-        st.markdown("""
-        ### Monthly Tasks
-
-        **1. Run Analysis on latest data**
-        Upload the past week's files and check fleet summary.
-        Download anomaly report and file for records.
-
-        **2. Review anomaly trends**
-        Compare this month's anomaly counts to previous months.
-        Increasing warning counts may indicate gradual degradation or soiling.
-
-        **3. Retrain models**
-        Upload full accumulated data (all months to date).
-        Remove known fault periods before uploading.
-        Check retrain summary — confirm RMSE improved or stayed stable.
-
-        **4. Archive important analysis results**
-        Before running next analysis, copy the contents of
-        `outputs/ITC_INV/latest/` to `outputs/ITC_INV/archive/YYYY-MM-DD/`
-        if you want to preserve plots from a significant anomaly event.
-
-        ---
-
-        ### Annual Tasks
-
-        **Review model architecture**
-        At 12 months of data, consider whether the weather-only analytics
-        model should be added for soiling and derating detection.
-
-        **Full grid search refresh**
-        Re-run full hyperparameter grid search to check if better parameters
-        exist for the now-larger dataset.
-        """)                        
+        ### The RESET Button
+        Located at the bottom of the sidebar under a strict confirmation toggle. Typing **RESET** and clicking the button completely deletes all trained model files, cleans out the dashboard cache, and clears the registry for a fresh setup. Use with extreme caution.
+                    """)                       
 
 
         

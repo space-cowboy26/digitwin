@@ -9,3 +9,4 @@ joblib
 openpyxl
 shap
 plotly
+optuna
