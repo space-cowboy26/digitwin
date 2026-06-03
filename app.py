@@ -1087,7 +1087,7 @@ with tab_analysis:
 # - TAB 4 IMPLEMENTATION
 
 with tab_manual:
-    st.header("Operational Manual — Solar Digital Twin Dashboard")
+    st.header("Operational Manual")
     st.markdown("---")
 
     # ---- System Overview -----------------------------------------------------
@@ -1191,7 +1191,7 @@ with tab_manual:
     st.markdown("---")
 
     # ---- Tab 1: Analysis -----------------------------------------------------
-    with st.expander(" 3. ANALYSIS TAB  ", expanded=False):
+    with st.expander(" 2. ANALYSIS TAB  ", expanded=False):
         st.markdown("""
         ### Purpose
         Upload recent data (1-2 weeks or a single day) to let the system score your current operations and look for faults.
@@ -1213,7 +1213,7 @@ with tab_manual:
         """)
 
     # ---- Tab 2: Experiments --------------------------------------------------
-    with st.expander(" 4. EXPERIMENTS TAB ", expanded=False):
+    with st.expander(" 3. EXPERIMENTS TAB ", expanded=False):
         st.markdown("""
         ### Purpose
         An engineering workspace to test different settings, tuning methods, and models on a single inverter before pushing them to the live sidebar.
@@ -1230,7 +1230,7 @@ with tab_manual:
     # ---- Tab 3: Train --------------------------------------------------------
     # app.py — TRAIN TAB MANUAL SECTION
 
-    with st.expander(" 3. TRAIN TAB", expanded=False):
+    with st.expander(" 4. TRAIN TAB", expanded=False):
         st.markdown("""
         ### Purpose
         Builds the initial digital twin for new inverters. Use this to establish a performance baseline using 3-6 months of historical data.
@@ -1261,7 +1261,7 @@ with tab_manual:
         """)
 
     # ---- System Maintenance --------------------------------------------------
-    with st.expander(" 6. SIDEBAR STATUS & SYSTEM MAINTENANCE", expanded=False):
+    with st.expander(" 5. SIDEBAR STATUS & SYSTEM MAINTENANCE", expanded=False):
         st.markdown("""
         ### Sidebar Status Meanings
         * **Trained | Last: 2026-06-02 | RMSE: 32.1 kW:** The digital twin is active, highly accurate (under 1.1% capacity error), and actively protecting that inverter.
