@@ -11,3 +11,4 @@ shap
 plotly
 optuna
 pyarrow
+optuna-integration
